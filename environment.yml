@@ -1,0 +1,13 @@
+name: mas_flocking
+channels:
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - scipy
+  - matplotlib
+  - networkx
+  - imageio
+  - tqdm
+  - pyyaml
+  - jupyter

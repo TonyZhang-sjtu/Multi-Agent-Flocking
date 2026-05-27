@@ -1,0 +1,14 @@
+cat > .gitignore <<'EOF'
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+.DS_Store
+.pytest_cache/
+
+# Conda/local env files
+.env
+
+# If public, avoid uploading copyrighted papers
+papers/*.pdf
+EOF

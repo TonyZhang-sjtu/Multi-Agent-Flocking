@@ -1,0 +1,8 @@
+numpy
+scipy
+matplotlib
+networkx
+imageio
+tqdm
+pyyaml
+jupyter
