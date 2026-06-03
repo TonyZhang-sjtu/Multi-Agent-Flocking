@@ -43,6 +43,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--b", type=float, default=5.0)
     parser.add_argument("--c1-alpha", type=float, default=1.0)
     parser.add_argument("--c2-alpha", type=float, default=2.0)
+    parser.add_argument("--d-safe-agent", type=float, default=0.40)
+    parser.add_argument("--k-barrier", type=float, default=5.0)
     parser.add_argument("--skip-animation", action="store_true")
     parser.add_argument("--output-dir", default="outputs")
     return parser
@@ -98,6 +100,8 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         b=args.b,
         c1_alpha=args.c1_alpha,
         c2_alpha=args.c2_alpha,
+        d_safe_agent=args.d_safe_agent,
+        k_barrier=args.k_barrier,
     )
 
     env = FlockingEnv(

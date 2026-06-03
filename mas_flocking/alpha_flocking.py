@@ -27,6 +27,9 @@ class AlphaFlockingParams:
     b: float = 5.0
     c1_alpha: float = 1.0
     c2_alpha: float = 2.0
+    # ---- 新增安全屏障可调参数 ----
+    d_safe_agent: float = 0.40
+    k_barrier: float = 5.0
 
     def __post_init__(self) -> None:
         if self.epsilon <= 0:
@@ -41,6 +44,11 @@ class AlphaFlockingParams:
             raise ValueError("a and b must be positive")
         if self.c1_alpha < 0 or self.c2_alpha < 0:
             raise ValueError("c1_alpha and c2_alpha must be non-negative")
+        # ---- 新增参数校验 ----
+        if self.d_safe_agent < 0:
+            raise ValueError("d_safe_agent must be non-negative")
+        if self.k_barrier < 0:
+            raise ValueError("k_barrier must be non-negative")
 
 
 ParamsLike = Optional[Union[AlphaFlockingParams, Mapping[str, float]]]
@@ -145,14 +153,14 @@ def alpha_flocking_control(q: np.ndarray, p: np.ndarray, params: ParamsLike = No
     velocity_diff = p_arr[None, :, :] - p_arr[:, None, :]
     consensus_term = prm.c2_alpha * np.sum(adjacency[:, :, None] * velocity_diff, axis=1)
 
-    # ---------------- 核心修改部分 ----------------
+    # ---------------- 核心修改：使用动态参数 ----------------
     # 1. 计算真实的 pairwise 欧氏距离
     diff = q_arr[None, :, :] - q_arr[:, None, :]
     euclid_dists = np.linalg.norm(diff, axis=-1)
 
-    # 2. 设定硬安全距离阈值（例如：两倍智能体半径 0.24，外加 0.16 的安全余量 = 0.4 米）
-    d_safe_agent = 0.40
-    k_barrier = 5.0  # 障碍惩罚增益
+    # 2. 设定硬安全距离阈值与排斥增益（从配置中读取）
+    d_safe_agent = prm.d_safe_agent
+    k_barrier = prm.k_barrier  # 屏障排斥增益
 
     barrier_force = np.zeros_like(q_arr)
     n_agents = q_arr.shape[0]
@@ -164,12 +172,9 @@ def alpha_flocking_control(q: np.ndarray, p: np.ndarray, params: ParamsLike = No
             dist = euclid_dists[i, j]
             # 当两智能体距离突破硬安全边界时，触发强排斥
             if dist < d_safe_agent:
-                # 从 j 指向 i 的排斥方向向量
                 dir_vec = (q_arr[i] - q_arr[j]) / (dist + 1e-12)
-                # 计算反比强排斥力（类似于传统 APF 斥力公式）
                 force_mag = k_barrier * (1.0 / (dist + 1e-12) - 1.0 / d_safe_agent) ** 2
                 barrier_force[i] += force_mag * dir_vec
 
     # 3. 将原控制律与硬屏障力叠加
     return gradient_term + consensus_term + barrier_force
-    # ---------------------------------------------

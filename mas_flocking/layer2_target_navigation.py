@@ -33,7 +33,7 @@ from .visualize import animate_trajectories, plot_metrics, plot_trajectories
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Layer 2 Olfati-Saber alpha+gamma target navigation.")
     parser.add_argument("--n-agents", type=int, default=20)
-    parser.add_argument("--n-steps", type=int, default=1200)
+    parser.add_argument("--n-steps", type=int, default=2400)
     parser.add_argument("--dt", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=2)
     parser.add_argument("--init-min-sep", type=float, default=0.75)
@@ -56,6 +56,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--c2-alpha", type=float, default=2.0)
     parser.add_argument("--c1-gamma", type=float, default=1.0)
     parser.add_argument("--c2-gamma", type=float, default=1.2)
+    parser.add_argument("--d-safe-agent", type=float, default=0.40)
+    parser.add_argument("--k-barrier", type=float, default=5.0)
     parser.add_argument("--skip-animation", action="store_true")
     parser.add_argument("--output-dir", default="outputs")
     return parser
@@ -113,6 +115,8 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         b=args.b,
         c1_alpha=args.c1_alpha,
         c2_alpha=args.c2_alpha,
+        d_safe_agent=args.d_safe_agent,
+        k_barrier=args.k_barrier,
     )
     gamma_params = GammaNavigationParams(c1_gamma=args.c1_gamma, c2_gamma=args.c2_gamma)
     gamma = GammaAgent(q=goal, p=goal_velocity)

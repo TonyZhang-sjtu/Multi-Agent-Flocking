@@ -78,6 +78,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--k-tangent", type=float, default=0.6)
     parser.add_argument("--k-obs", type=float, default=1.5)
     parser.add_argument("--max-obs-speed", type=float, default=2.0)
+    parser.add_argument("--d-safe-agent", type=float, default=0.40)
+    parser.add_argument("--k-barrier", type=float, default=20.0) # 动态避障极端场景下，默认给 20.0 保证绝对安全
     parser.add_argument("--skip-animation", action="store_true")
     parser.add_argument("--output-dir", default="outputs")
     return parser
@@ -140,6 +142,8 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         b=args.b,
         c1_alpha=args.c1_alpha,
         c2_alpha=args.c2_alpha,
+        d_safe_agent=args.d_safe_agent,
+        k_barrier=args.k_barrier,
     )
     gamma_params = GammaNavigationParams(c1_gamma=args.c1_gamma, c2_gamma=args.c2_gamma)
     beta_params = BetaObstacleParams(

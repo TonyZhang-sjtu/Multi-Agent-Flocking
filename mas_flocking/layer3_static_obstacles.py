@@ -33,7 +33,7 @@ from .visualize import animate_trajectories, plot_metrics, plot_trajectories
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run Layer 3 alpha+beta+gamma static-obstacle flocking.")
     parser.add_argument("--n-agents", type=int, default=20)
-    parser.add_argument("--n-steps", type=int, default=1600)
+    parser.add_argument("--n-steps", type=int, default=2400)
     parser.add_argument("--dt", type=float, default=0.01)
     parser.add_argument("--seed", type=int, default=3)
     parser.add_argument("--init-min-sep", type=float, default=0.75)
@@ -63,6 +63,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--c2-beta", type=float, default=2.0)
     parser.add_argument("--agent-radius", type=float, default=0.12)
     parser.add_argument("--beta-velocity-mode", choices=["projected", "zero"], default="projected")
+    parser.add_argument("--d-safe-agent", type=float, default=0.40)
+    parser.add_argument("--k-barrier", type=float, default=15.0)  # 静态障碍物下默认高防御力
     parser.add_argument("--skip-animation", action="store_true")
     parser.add_argument("--output-dir", default="outputs")
     return parser
@@ -136,6 +138,8 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         b=args.b,
         c1_alpha=args.c1_alpha,
         c2_alpha=args.c2_alpha,
+        d_safe_agent=args.d_safe_agent,
+        k_barrier=args.k_barrier,
     )
     gamma_params = GammaNavigationParams(c1_gamma=args.c1_gamma, c2_gamma=args.c2_gamma)
     beta_params = BetaObstacleParams(
