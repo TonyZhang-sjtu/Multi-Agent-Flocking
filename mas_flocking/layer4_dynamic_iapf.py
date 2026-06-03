@@ -37,9 +37,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--method", choices=["dynamic_iapf", "static_beta", "no_tangent", "no_avoidance"], default="dynamic_iapf")
     parser.add_argument(
         "--scenario",
-        choices=["layer3_same", "single_crossing", "layer0_dynamic", "multi_dynamic"],
+        choices=["layer3_same", "single_crossing", "layer0_dynamic", "multi_dynamic", "complex_dynamic"],
         default="layer3_same",
     )
+    parser.add_argument("--fail-count", type=int, default=0, help="Number of agents that fail during simulation.")
+    parser.add_argument("--fail-step", type=int, default=400, help="Step at which agents fail.")
     parser.add_argument("--n-agents", type=int, default=20)
     parser.add_argument("--n-steps", type=int, default=1800)
     parser.add_argument("--dt", type=float, default=0.01)
@@ -107,6 +109,20 @@ def build_obstacles(scenario: str) -> List[CircleObstacle]:
             CircleObstacle(center=(12.0, 1.5), radius=0.55, velocity=(0.0, 0.35), name="lower_crossing", dynamic=True),
             CircleObstacle(center=(15.5, 6.0), radius=0.45, velocity=(-0.35, 0.0), name="head_on", dynamic=True),
         ]
+    if scenario == "complex_dynamic":
+        return [
+            CircleObstacle(center=(8.0, 10.0), radius=0.5, velocity=(0.2, -0.5), name="obs1", dynamic=True),
+            CircleObstacle(center=(10.0, 2.0), radius=0.6, velocity=(-0.1, 0.4), name="obs2", dynamic=True),
+            CircleObstacle(center=(12.0, 8.0), radius=0.4, velocity=(0.0, -0.6), name="obs3", dynamic=True),
+            CircleObstacle(center=(14.0, 4.0), radius=0.7, velocity=(-0.2, 0.3), name="obs4", dynamic=True),
+            CircleObstacle(center=(16.0, 9.0), radius=0.5, velocity=(-0.3, -0.2), name="obs5", dynamic=True),
+            CircleObstacle(center=(7.0, 3.0), radius=0.45, velocity=(0.3, 0.1), name="obs6", dynamic=True),
+            CircleObstacle(center=(15.0, 2.0), radius=0.55, velocity=(-0.25, 0.2), name="obs7", dynamic=True),
+            CircleObstacle(center=(17.0, 6.0), radius=0.4, velocity=(-0.4, -0.1), name="obs8", dynamic=True),
+            CircleObstacle(center=(11.0, 6.0), radius=0.8, velocity=(0.0, 0.0), name="static_center", dynamic=False),
+            CircleObstacle(center=(13.0, 11.0), radius=0.6, velocity=(0.0, 0.0), name="static_top", dynamic=False),
+            CircleObstacle(center=(9.0, 1.0), radius=0.6, velocity=(0.0, 0.0), name="static_bottom", dynamic=False),
+        ]
     raise ValueError(f"Unknown scenario: {scenario}")
 
 
@@ -163,6 +179,9 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
     p0 = rng.normal(loc=0.0, scale=args.init_velocity_scale, size=(args.n_agents, 2))
     state = env.reset(init_mode="custom", q0=q0, p0=p0)
 
+    # 随机选择故障智能体
+    failed_indices = rng.choice(args.n_agents, size=args.fail_count, replace=False) if args.fail_count > 0 else []
+
     traj: List[np.ndarray] = []
     velocities: List[np.ndarray] = []
     obstacle_frames: List[List[Dict[str, object]]] = []
@@ -170,6 +189,7 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
     total_collision_count = 0
     logs: Dict[str, List[float]] = {
         "mean_goal_distance": [],
+        "active_mean_goal_distance": [],  # 新增：非故障智能体的平均目标距离
         "center_of_mass_goal_distance": [],
         "velocity_consensus_error": [],
         "min_agent_distance": [],
@@ -186,7 +206,9 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         "lambda_2": [],
     }
 
-    for _ in tqdm(range(args.n_steps), desc=f"Layer 4 {args.method}", leave=False):
+    active_indices = [i for i in range(args.n_agents) if i not in failed_indices]
+
+    for step_idx in tqdm(range(args.n_steps), desc=f"Layer 4 {args.method}", leave=False):
         if args.method == "no_avoidance":
             u = free_flocking_with_navigation_control(state.q, state.p, alpha_params, gamma, gamma_params)
         elif args.method == "static_beta":
@@ -204,6 +226,14 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
                 dynamic_params,
                 include_beta=True,
             )
+        
+        # ---------------- 核心修改部分：模拟故障 ----------------
+        if step_idx >= args.fail_step and len(failed_indices) > 0:
+            # 故障智能体控制输入置零，且强制速度衰减（模拟失去动力）
+            u[failed_indices] = 0.0
+            state.p[failed_indices] *= 0.95 # 快速衰减速度
+        # ------------------------------------------------------
+
         diagnostics = dynamic_iapf_diagnostics(state.q, state.p, env.obstacles, dynamic_params)
         state = env.step(u)
         gamma.step(args.dt)
@@ -216,6 +246,14 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         velocities.append(state.p.copy())
         obstacle_frames.append(state.obstacles)
         logs["mean_goal_distance"].append(mean_goal_distance(state.q, gamma.q))
+        
+        # 计算活跃智能体的指标
+        if len(active_indices) > 0:
+            active_q = state.q[active_indices]
+            logs["active_mean_goal_distance"].append(mean_goal_distance(active_q, gamma.q))
+        else:
+            logs["active_mean_goal_distance"].append(0.0)
+
         logs["center_of_mass_goal_distance"].append(center_of_mass_goal_distance(state.q, gamma.q))
         logs["velocity_consensus_error"].append(velocity_consensus_error(state.p))
         logs["min_agent_distance"].append(min_agent_distance(state.q))
@@ -262,6 +300,8 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
     print("Layer 4 simulation finished.")
     print(f"Method: {args.method}")
     print(f"Final mean goal distance: {logs['mean_goal_distance'][-1]:.4f}")
+    if args.fail_count > 0:
+        print(f"Final active mean goal distance: {logs['active_mean_goal_distance'][-1]:.4f}")
     print(f"Final center-of-mass goal distance: {logs['center_of_mass_goal_distance'][-1]:.4f}")
     print(f"Final velocity consensus error: {logs['velocity_consensus_error'][-1]:.4f}")
     print(f"Final min obstacle clearance: {logs['min_obstacle_clearance'][-1]:.4f}")

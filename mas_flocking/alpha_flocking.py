@@ -129,7 +129,7 @@ def alpha_adjacency_matrix(q: np.ndarray, params: ParamsLike = None) -> np.ndarr
 
 
 def alpha_flocking_control(q: np.ndarray, p: np.ndarray, params: ParamsLike = None) -> np.ndarray:
-    """Compute Algorithm 1 alpha-agent free-space flocking acceleration."""
+    """Compute Algorithm 1 alpha-agent free-space flocking acceleration with hard-core safety barrier."""
     prm = as_alpha_params(params)
     q_arr = as_2d_array(q, "q")
     p_arr = as_2d_array(p, "p", expected_rows=q_arr.shape[0])
@@ -145,4 +145,31 @@ def alpha_flocking_control(q: np.ndarray, p: np.ndarray, params: ParamsLike = No
     velocity_diff = p_arr[None, :, :] - p_arr[:, None, :]
     consensus_term = prm.c2_alpha * np.sum(adjacency[:, :, None] * velocity_diff, axis=1)
 
-    return gradient_term + consensus_term
+    # ---------------- 核心修改部分 ----------------
+    # 1. 计算真实的 pairwise 欧氏距离
+    diff = q_arr[None, :, :] - q_arr[:, None, :]
+    euclid_dists = np.linalg.norm(diff, axis=-1)
+
+    # 2. 设定硬安全距离阈值（例如：两倍智能体半径 0.24，外加 0.16 的安全余量 = 0.4 米）
+    d_safe_agent = 0.40
+    k_barrier = 5.0  # 障碍惩罚增益
+
+    barrier_force = np.zeros_like(q_arr)
+    n_agents = q_arr.shape[0]
+
+    for i in range(n_agents):
+        for j in range(n_agents):
+            if i == j:
+                continue
+            dist = euclid_dists[i, j]
+            # 当两智能体距离突破硬安全边界时，触发强排斥
+            if dist < d_safe_agent:
+                # 从 j 指向 i 的排斥方向向量
+                dir_vec = (q_arr[i] - q_arr[j]) / (dist + 1e-12)
+                # 计算反比强排斥力（类似于传统 APF 斥力公式）
+                force_mag = k_barrier * (1.0 / (dist + 1e-12) - 1.0 / d_safe_agent) ** 2
+                barrier_force[i] += force_mag * dir_vec
+
+    # 3. 将原控制律与硬屏障力叠加
+    return gradient_term + consensus_term + barrier_force
+    # ---------------------------------------------

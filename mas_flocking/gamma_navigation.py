@@ -84,7 +84,7 @@ def gamma_navigation_control(
     gamma: GammaAgent,
     params: GammaParamsLike = None,
 ) -> np.ndarray:
-    """Compute the Algorithm 2 gamma-agent target navigation acceleration."""
+    """Compute the Algorithm 2 gamma-agent target navigation acceleration with target decay."""
     prm = as_gamma_params(params)
     q_arr = as_2d_array(q, "q")
     p_arr = as_2d_array(p, "p", expected_rows=q_arr.shape[0])
@@ -93,7 +93,20 @@ def gamma_navigation_control(
 
     pos_error = q_arr - gamma.q[None, :]
     vel_error = p_arr - gamma.p[None, :]
-    return -prm.c1_gamma * vector_sigma_1(pos_error) - prm.c2_gamma * vel_error
+
+    # ---------------- 核心修改部分 ----------------
+    # 计算每个智能体到目标点的欧氏距离
+    dists = np.linalg.norm(pos_error, axis=1, keepdims=True)
+
+    # 设定一个衰减半径（例如：期望晶格间距 d 的 2 倍，约 2.4 米）
+    r_decay = 2.4
+
+    # 使用指数函数平滑衰减：距离越近，decay_scale 越接近 0
+    decay_scale = 1.0 - np.exp(-(dists / r_decay) ** 2)
+
+    # 将衰减因子应用到位置误差引力项上
+    return -prm.c1_gamma * decay_scale * vector_sigma_1(pos_error) - prm.c2_gamma * vel_error
+    # ---------------------------------------------
 
 
 def free_flocking_with_navigation_control(

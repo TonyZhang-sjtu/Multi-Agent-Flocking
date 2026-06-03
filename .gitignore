@@ -12,3 +12,5 @@ __pycache__/
 # If public, avoid uploading copyrighted papers
 papers/*.pdf
 EOF
+
+code_collector*
