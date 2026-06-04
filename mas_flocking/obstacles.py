@@ -75,3 +75,71 @@ class CircleObstacle:
             "velocity": self.velocity.copy(),
             "dynamic": self.dynamic,
         }
+
+
+class ScriptedCircleObstacle(CircleObstacle):
+    """Circular obstacle with analytic time-varying center and velocity."""
+
+    def __init__(
+        self,
+        center: Tuple[float, float],
+        radius: float,
+        base_velocity: Tuple[float, float] = (0.0, 0.0),
+        acceleration: Tuple[float, float] = (0.0, 0.0),
+        sine_amplitude: Tuple[float, float] = (0.0, 0.0),
+        sine_omega: float = 0.0,
+        sine_phase: float = 0.0,
+        circle_radius: float = 0.0,
+        circle_omega: float = 0.0,
+        circle_phase: float = 0.0,
+        name: str = "scripted_obstacle",
+    ) -> None:
+        super().__init__(center=center, radius=radius, velocity=base_velocity, name=name, dynamic=True)
+        self.origin = self.center.copy()
+        self.base_velocity = as_vector2(np.asarray(base_velocity, dtype=float), "base_velocity")
+        self.acceleration = as_vector2(np.asarray(acceleration, dtype=float), "acceleration")
+        self.sine_amplitude = as_vector2(np.asarray(sine_amplitude, dtype=float), "sine_amplitude")
+        self.sine_omega = float(sine_omega)
+        self.sine_phase = float(sine_phase)
+        self.circle_radius = float(circle_radius)
+        self.circle_omega = float(circle_omega)
+        self.circle_phase = float(circle_phase)
+        self.script_time = 0.0
+        self.center = self._center_at(0.0)
+        self.velocity = self._velocity_at(0.0)
+
+    def step(self, dt: float, world_size: Optional[np.ndarray] = None, boundary_mode: str = "reflect") -> None:
+        """Advance scripted obstacle using its analytic trajectory."""
+        self.script_time += float(dt)
+        self.center = self._center_at(self.script_time)
+        self.velocity = self._velocity_at(self.script_time)
+        if world_size is not None:
+            self.handle_boundary(world_size, boundary_mode=boundary_mode)
+
+    def _center_at(self, t: float) -> np.ndarray:
+        t_float = float(t)
+        linear = self.base_velocity * t_float + 0.5 * self.acceleration * t_float * t_float
+        sine = self.sine_amplitude * (np.sin(self.sine_omega * t_float + self.sine_phase) - np.sin(self.sine_phase))
+        circular = np.zeros(2, dtype=float)
+        if self.circle_radius != 0.0 and self.circle_omega != 0.0:
+            angle = self.circle_omega * t_float + self.circle_phase
+            start = np.array([np.cos(self.circle_phase), np.sin(self.circle_phase)])
+            current = np.array([np.cos(angle), np.sin(angle)])
+            circular = self.circle_radius * (current - start)
+        return self.origin + linear + sine + circular
+
+    def _velocity_at(self, t: float) -> np.ndarray:
+        t_float = float(t)
+        velocity = self.base_velocity + self.acceleration * t_float
+        velocity = velocity + self.sine_amplitude * self.sine_omega * np.cos(self.sine_omega * t_float + self.sine_phase)
+        if self.circle_radius != 0.0 and self.circle_omega != 0.0:
+            angle = self.circle_omega * t_float + self.circle_phase
+            velocity = velocity + self.circle_radius * self.circle_omega * np.array([-np.sin(angle), np.cos(angle)])
+        return velocity
+
+    def as_dict(self) -> Dict[str, object]:
+        """Return a serializable scripted obstacle snapshot."""
+        snapshot = super().as_dict()
+        snapshot["script_time"] = float(self.script_time)
+        snapshot["scripted"] = True
+        return snapshot

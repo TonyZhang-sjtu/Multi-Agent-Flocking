@@ -26,6 +26,7 @@ class DynamicIAPFParams:
     k_tangent: float = 0.6
     k_obs: float = 1.5
     max_obs_speed: float = 2.0
+    agent_radius: float = 0.0
     eps: float = 1e-6
     use_tangent: bool = True
 
@@ -40,6 +41,8 @@ class DynamicIAPFParams:
             raise ValueError("dynamic IAPF gains must be non-negative")
         if self.max_obs_speed <= 0:
             raise ValueError("max_obs_speed must be positive")
+        if self.agent_radius < 0:
+            raise ValueError("agent_radius must be non-negative")
         if self.eps <= 0:
             raise ValueError("eps must be positive")
 
@@ -72,7 +75,7 @@ def closest_approach(
     t_star = -np.sum(rel_pos * rel_vel, axis=1) / (rel_speed_sq + prm.eps)
     t_star = np.clip(t_star, 0.0, prm.prediction_horizon)
     r_pred = rel_pos + t_star[:, None] * rel_vel
-    d_pred = np.linalg.norm(r_pred, axis=1) - obstacle.radius - prm.safe_distance
+    d_pred = np.linalg.norm(r_pred, axis=1) - obstacle.radius - prm.agent_radius - prm.safe_distance
     closing_speed = np.maximum(0.0, -np.sum(rel_pos * rel_vel, axis=1) / (np.linalg.norm(rel_pos, axis=1) + prm.eps))
     return t_star, r_pred, d_pred, closing_speed
 

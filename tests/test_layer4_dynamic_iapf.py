@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unittest
+from tempfile import TemporaryDirectory
 
 import numpy as np
 
@@ -17,6 +18,7 @@ from mas_flocking.dynamic_iapf import (
     flocking_with_dynamic_iapf_control,
 )
 from mas_flocking.gamma_navigation import GammaAgent, GammaNavigationParams
+from mas_flocking.layer4_dynamic_iapf import LAYER4_METRIC_KEYS, build_arg_parser, run_demo
 from mas_flocking.metrics import collision_count
 from mas_flocking.obstacles import CircleObstacle
 from mas_flocking.simulator import FlockingEnv
@@ -41,6 +43,14 @@ class TestDynamicIAPF(unittest.TestCase):
         np.testing.assert_allclose(r_pred[0], np.zeros(2), atol=1e-5)
         self.assertLess(float(d_pred[0]), 0.0)
         self.assertGreater(float(closing_speed[0]), 0.0)
+
+    def test_closest_approach_clearance_includes_agent_radius(self) -> None:
+        params = DynamicIAPFParams(prediction_horizon=5.0, safe_distance=0.2, agent_radius=0.12)
+        obstacle = CircleObstacle(center=(2.0, 1.0), radius=0.5, velocity=(0.0, -1.0), dynamic=True)
+        q = np.array([[2.0, 0.0]])
+        p = np.zeros((1, 2))
+        _, _, d_pred, _ = closest_approach(q, p, obstacle, params)
+        self.assertAlmostEqual(float(d_pred[0]), -0.82, places=5)
 
     def test_approaching_obstacle_has_higher_risk_than_receding(self) -> None:
         params = DynamicIAPFParams(influence_distance=3.0)
@@ -116,6 +126,39 @@ class TestDynamicIAPF(unittest.TestCase):
         self.assertTrue(np.all(np.isfinite(state.q)))
         self.assertTrue(np.all(np.isfinite(state.p)))
         self.assertGreaterEqual(collision_count(state.q, env.obstacles, agent_radius=beta_params.agent_radius), 0)
+
+    def test_layer4_dynamic_scenarios_share_metric_schema(self) -> None:
+        parser = build_arg_parser()
+        with TemporaryDirectory() as tmpdir:
+            schemas = []
+            for scenario in (
+                "layer3_same",
+                "complex_dynamic",
+                "multi_curved_dynamic",
+                "mixed_accel_dynamic",
+                "multi_curved_dynamic_v2",
+                "mixed_accel_dynamic_v2",
+            ):
+                args = parser.parse_args(
+                    [
+                        "--scenario",
+                        scenario,
+                        "--method",
+                        "dynamic_iapf",
+                        "--n-agents",
+                        "6",
+                        "--n-steps",
+                        "8",
+                        "--skip-animation",
+                        "--output-dir",
+                        tmpdir,
+                    ]
+                )
+                logs = run_demo(args)
+                schemas.append(list(logs.keys()))
+                self.assertTrue(all(len(values) == args.n_steps for values in logs.values()))
+            for schema in schemas:
+                self.assertEqual(schema, LAYER4_METRIC_KEYS)
 
 
 if __name__ == "__main__":

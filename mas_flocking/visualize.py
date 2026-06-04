@@ -24,16 +24,31 @@ def _prepare_traj(traj: Iterable[np.ndarray]) -> np.ndarray:
     return arr
 
 
-def _draw_obstacles(ax: plt.Axes, obstacles: Optional[List[CircleObstacle]]) -> None:
+def _draw_obstacles(ax: plt.Axes, obstacles: Optional[List[CircleObstacle]], agent_radius: float = 0.0) -> None:
     if not obstacles:
         return
     for obs in obstacles:
         circle = plt.Circle(obs.center, obs.radius, fill=False, linewidth=2.0, color="tab:red")
         ax.add_patch(circle)
+        if agent_radius > 0.0:
+            inflated = plt.Circle(
+                obs.center,
+                obs.radius + agent_radius,
+                fill=False,
+                linestyle="--",
+                linewidth=1.2,
+                color="tab:red",
+                alpha=0.55,
+            )
+            ax.add_patch(inflated)
         ax.scatter(obs.center[0], obs.center[1], s=16, color="tab:red")
 
 
-def _draw_obstacle_snapshots(ax: plt.Axes, obstacle_snapshots: Optional[Sequence[Dict[str, object]]]) -> List[object]:
+def _draw_obstacle_snapshots(
+    ax: plt.Axes,
+    obstacle_snapshots: Optional[Sequence[Dict[str, object]]],
+    agent_radius: float = 0.0,
+) -> List[object]:
     artists: List[object] = []
     if not obstacle_snapshots:
         return artists
@@ -46,6 +61,18 @@ def _draw_obstacle_snapshots(ax: plt.Axes, obstacle_snapshots: Optional[Sequence
         point = ax.scatter(center[0], center[1], s=18, color=color)
         ax.add_patch(circle)
         artists.extend([circle, point])
+        if agent_radius > 0.0:
+            inflated = plt.Circle(
+                center,
+                radius + agent_radius,
+                fill=False,
+                linestyle="--",
+                linewidth=1.2,
+                color=color,
+                alpha=0.55,
+            )
+            ax.add_patch(inflated)
+            artists.append(inflated)
     return artists
 
 
@@ -54,6 +81,7 @@ def plot_trajectories(
     goal: Optional[np.ndarray] = None,
     obstacles: Optional[List[CircleObstacle]] = None,
     world_size: Optional[np.ndarray] = None,
+    agent_radius: float = 0.0,
     save_path: Optional[str] = None,
     title: str = "Layer 0 Agent Trajectories",
 ) -> None:
@@ -65,12 +93,22 @@ def plot_trajectories(
         ax.plot(traj_arr[:, i, 0], traj_arr[:, i, 1], linewidth=1.0, alpha=0.8)
         ax.scatter(traj_arr[0, i, 0], traj_arr[0, i, 1], s=14, marker="o", color="tab:green")
         ax.scatter(traj_arr[-1, i, 0], traj_arr[-1, i, 1], s=18, marker="x", color="tab:blue")
+        if agent_radius > 0.0:
+            endpoint = plt.Circle(
+                traj_arr[-1, i],
+                agent_radius,
+                fill=False,
+                linewidth=0.8,
+                color="tab:blue",
+                alpha=0.35,
+            )
+            ax.add_patch(endpoint)
 
     if goal is not None:
         goal_arr = np.asarray(goal, dtype=float)
         ax.scatter(goal_arr[0], goal_arr[1], s=140, marker="*", color="gold", edgecolor="black", label="Goal")
 
-    _draw_obstacles(ax, obstacles)
+    _draw_obstacles(ax, obstacles, agent_radius=agent_radius)
 
     if world_size is not None:
         world = np.asarray(world_size, dtype=float)
@@ -112,6 +150,7 @@ def animate_trajectories(
     obstacles: Optional[List[CircleObstacle]] = None,
     obstacle_trajectories: Optional[Iterable[Sequence[Dict[str, object]]]] = None,
     world_size: Optional[np.ndarray] = None,
+    agent_radius: float = 0.0,
     save_path: Optional[str] = None,
     interval_ms: int = 40,
     stride: int = 5,
@@ -146,7 +185,7 @@ def animate_trajectories(
     ax.set_ylabel("y")
 
     if obstacle_frames is None:
-        _draw_obstacles(ax, obstacles)
+        _draw_obstacles(ax, obstacles, agent_radius=agent_radius)
     if goal is not None:
         goal_arr = np.asarray(goal, dtype=float)
         ax.scatter(goal_arr[0], goal_arr[1], s=140, marker="*", color="gold", edgecolor="black")
@@ -155,24 +194,33 @@ def animate_trajectories(
     quiver = ax.quiver([], [], [], [], color="tab:orange", angles="xy", scale_units="xy", scale=1.0, width=0.004)
     time_text = ax.text(0.02, 0.96, "", transform=ax.transAxes)
     obstacle_artists: List[object] = []
+    agent_artists: List[object] = []
 
     def update(frame_idx: int):
-        nonlocal quiver, obstacle_artists
+        nonlocal quiver, obstacle_artists, agent_artists
         q = traj_arr[frame_idx]
         scatter.set_offsets(q)
         quiver.remove()
         for artist in obstacle_artists:
             artist.remove()
         obstacle_artists = []
+        for artist in agent_artists:
+            artist.remove()
+        agent_artists = []
         if obstacle_frames is not None:
-            obstacle_artists = _draw_obstacle_snapshots(ax, obstacle_frames[frame_idx])
+            obstacle_artists = _draw_obstacle_snapshots(ax, obstacle_frames[frame_idx], agent_radius=agent_radius)
+        if agent_radius > 0.0:
+            for pos in q:
+                agent_circle = plt.Circle(pos, agent_radius, fill=False, linewidth=0.8, color="tab:blue", alpha=0.45)
+                ax.add_patch(agent_circle)
+                agent_artists.append(agent_circle)
         if vel_arr is not None:
             v = vel_arr[frame_idx]
             quiver = ax.quiver(q[:, 0], q[:, 1], v[:, 0], v[:, 1], color="tab:orange", angles="xy", scale_units="xy", scale=8.0, width=0.004)
         else:
             quiver = ax.quiver([], [], [], [], color="tab:orange")
         time_text.set_text(f"step={frame_idx}")
-        return (scatter, quiver, time_text, *obstacle_artists)
+        return (scatter, quiver, time_text, *obstacle_artists, *agent_artists)
 
     animation = FuncAnimation(fig, update, frames=frames, interval=interval_ms, blit=False)
     if save_path is not None:

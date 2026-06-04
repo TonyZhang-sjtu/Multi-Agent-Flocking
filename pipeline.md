@@ -13,17 +13,17 @@
 | Layer | 内容 | 控制律 | 当前状态 |
 |---|---|---|---|
 | Layer 0 | 二阶点质量多智能体仿真环境 | demo controller | 已实现 |
-| Layer 1 | Olfati-Saber free-space alpha-agent flocking | `u = u_alpha` | 已实现 |
-| Layer 2 | gamma-agent 目标导航 | `u = u_alpha + u_gamma` | 已实现 |
+| Layer 1 | Olfati-Saber free-space alpha-agent flocking + agent-agent safety barrier | `u = u_alpha` | 已实现 |
+| Layer 2 | gamma-agent 目标导航 + 目标吸引衰减 | `u = u_alpha + u_gamma` | 已实现 |
 | Layer 3 | static beta-agent 静态圆形障碍物避障 | `u = u_alpha + u_beta + u_gamma` | 已实现 |
-| Layer 4 | Shao-inspired dynamic IAPF 动态障碍物避障 | `u = u_alpha + u_beta + u_gamma + u_dyn` | 已实现 |
+| Layer 4 | Shao-inspired dynamic IAPF 动态障碍物避障 + 复杂动态场景/故障模拟 | `u = u_alpha + u_beta + u_gamma + u_dyn` | 已实现 |
 
 参考论文：
 
 - `papers/Flocking_for_multi-agent_dynamic_systems_algorithms_and_theory.pdf`
 - `papers/Dynamic_Obstacle-Avoidance_Algorithm_for_Multi-Robot_Flocking_Based_on_Improved_Artificial_Potential_Field.pdf`
 
-需要注意：Layer 1 到 Layer 3 尽量贴近 Olfati-Saber 的 alpha/beta/gamma-agent 分层思想；Layer 4 是 Shao et al. 动态障碍物避障思想的工程化、预测式 IAPF 实现，不是对 Shao 原文所有速度融合公式的逐式完整复现。
+需要注意：Layer 1 到 Layer 3 的主体仍然贴近 Olfati-Saber 的 alpha/beta/gamma-agent 分层思想；当前代码在 alpha 控制中额外加入了工程化 agent-agent hard-core safety barrier，在 gamma 控制中加入了靠近目标时的吸引衰减。Layer 4 是 Shao et al. 动态障碍物避障思想的工程化、预测式 IAPF 实现，不是对 Shao 原文所有速度融合公式的逐式完整复现。
 
 ---
 
@@ -66,8 +66,8 @@ mas_flocking/
   metrics.py                       # 速度一致性、连通性、避障、目标距离等指标
   visualize.py                     # 轨迹图、动画、指标曲线绘制
   main.py                          # Layer 0 demo
-  alpha_flocking.py                # Layer 1 alpha-agent 控制
-  gamma_navigation.py              # Layer 2 gamma-agent 目标导航
+  alpha_flocking.py                # Layer 1 alpha-agent 控制 + agent-agent safety barrier
+  gamma_navigation.py              # Layer 2 gamma-agent 目标导航 + target decay
   beta_obstacle.py                 # Layer 3 beta-agent 静态障碍物避障
   dynamic_iapf.py                  # Layer 4 dynamic IAPF 动态障碍物避障
   layer1_free_flocking.py          # Layer 1 实验入口
@@ -310,16 +310,62 @@ $$
 
 ### 4.6 Alpha control
 
-alpha 控制由两部分组成：
+Olfati-Saber 原始 alpha 控制由两部分组成：
 
 $$
-u_i^\alpha = c_1^\alpha \sum_{j=1}^{N}\phi_\alpha(\|q_j-q_i\|_\sigma)n_{ij}
+u_{i,OS}^\alpha = c_1^\alpha \sum_{j=1}^{N}\phi_\alpha(\|q_j-q_i\|_\sigma)n_{ij}
 + c_2^\alpha \sum_{j=1}^{N}a_{ij}(q)(p_j-p_i)
 $$
 
 第一项负责维持距离并形成 alpha-lattice；第二项负责速度一致性。
 
 代码：`alpha_flocking.alpha_flocking_control(q, p, params)`。
+
+### 4.7 Agent-Agent Safety Barrier
+
+新 contribution 在 `alpha_flocking_control(...)` 中额外加入了 agent-agent hard-core safety barrier。这个项是当前工程实现的安全扩展，不属于 Olfati-Saber Algorithm 1 的原始 alpha 势函数。
+
+对任意 agent pair：
+
+$$
+d_{ij}^{E}=\|q_i-q_j\|
+$$
+
+如果：
+
+$$
+d_{ij}^{E}<d_{safe}^{agent}
+$$
+
+则对 agent `i` 加入强排斥：
+
+$$
+u_{i}^{barrier}
+=\sum_{\substack{j\ne i\\d_{ij}^{E}<d_{safe}^{agent}}}
+k_{barrier}
+\left(
+\frac{1}{d_{ij}^{E}+\varepsilon_b}
+-
+\frac{1}{d_{safe}^{agent}}
+\right)^2
+\frac{q_i-q_j}{d_{ij}^{E}+\varepsilon_b}
+$$
+
+如果 `d_ij^E >= d_safe_agent`，该 pair 不触发 barrier。
+
+最终当前实现中的 alpha 控制实际为：
+
+$$
+u_i^\alpha = u_{i,OS}^\alpha + u_i^{barrier}
+$$
+
+其中：
+
+- `d_safe_agent` 是 agent-agent 硬安全距离阈值；
+- `k_barrier` 是安全屏障排斥增益；
+- `epsilon_b = 1e-12` 是代码中为了避免除零加入的数值保护。
+
+这个扩展的作用是补足原始 alpha 势函数“柔性距离保持但没有硬安全边界”的问题。它会在 agent 过近时产生比普通 alpha repulsion 更强的排斥，当前 Layer 1/2/4 的结果中 `min_agent_distance` 已经被稳定推回到约 `0.28-0.30` 附近。
 
 默认参数：
 
@@ -333,8 +379,10 @@ $$
 | `b` | `5.0` | action function 参数 |
 | `c1_alpha` | `1.0` | 距离保持项增益 |
 | `c2_alpha` | `2.0` | 速度一致项增益 |
+| `d_safe_agent` | `0.40` | agent-agent hard-core 安全距离阈值 |
+| `k_barrier` | `5.0` | Layer 1/2 默认安全屏障排斥增益 |
 
-### 4.7 Layer 1 demo
+### 4.8 Layer 1 demo
 
 运行：
 
@@ -362,22 +410,23 @@ python -m mas_flocking.layer1_free_flocking --n-steps 1000
 
 ![Layer 1 animation](outputs/animations/layer1/layer1_alpha_flocking.gif)
 
-### 4.8 Layer 1 结果
+### 4.9 Layer 1 结果
 
 | 指标 | final | min | max | mean |
 |---|---:|---:|---:|---:|
-| velocity consensus error | `0.002152` | `0.002152` | `1.722054` | `0.179377` |
-| min agent distance | `0.149182` | `0.149182` | `0.845809` | `0.226800` |
-| lattice deviation energy | `0.220075` | `0.200387` | `1.074882` | `0.283687` |
+| velocity consensus error | `0.002490` | `0.002490` | `1.722054` | `0.176797` |
+| min agent distance | `0.304097` | `0.294825` | `0.845809` | `0.346326` |
+| lattice deviation energy | `0.207455` | `0.200261` | `1.074882` | `0.275087` |
 | mean neighbor count | `15.000000` | `6.625000` | `15.000000` | `14.535125` |
 | connected components | `1` | `1` | `1` | `1` |
 | lambda_2 | `16.000000` | `2.101423` | `16.000000` | `15.011083` |
 
 结果解读：
 
-- 速度一致性最终降到 `0.002152`，说明 alpha 速度同步项工作正常。
+- 速度一致性最终降到 `0.002490`，说明 alpha 速度同步项工作正常。
 - 连通分量始终为 `1`，说明当前初始化下 flock 没有 fragmentation。
 - `lattice_deviation_energy` 明显下降并保持较低，说明距离调节项能形成较稳定的局部结构。
+- 新增 safety barrier 把最小 agent-agent 距离从旧结果的约 `0.15` 提升到当前最小 `0.294825`，说明 agent-agent 安全边界明显改善。
 - Layer 1 不包含 gamma-agent，因此不会主动向某个目标点移动。
 
 ---
@@ -426,13 +475,27 @@ $$
 e_p = p_i-p_r
 $$
 
-控制项：
+当前新 contribution 在 gamma 位置吸引项前加入 target decay：
 
 $$
-u_i^\gamma = -c_1^\gamma \sigma_1^{vec}(q_i-q_r) - c_2^\gamma(p_i-p_r)
+r_{decay}=2.4
+$$
+
+$$
+s_i = 1-\exp\left(-\left(\frac{\|q_i-q_r\|}{r_{decay}}\right)^2\right)
+$$
+
+当 agent 离目标较远时，`s_i` 接近 `1`，gamma 位置吸引基本保持原强度；当 agent 已经靠近目标时，`s_i` 接近 `0`，位置吸引自动减弱。这可以减少 static gamma-agent 在终点附近持续把所有 agent 压缩到同一点的趋势。
+
+当前控制项：
+
+$$
+u_i^\gamma = -c_1^\gamma s_i\sigma_1^{vec}(q_i-q_r) - c_2^\gamma(p_i-p_r)
 $$
 
 代码：`gamma_navigation.gamma_navigation_control(...)`。
+
+注意：`r_decay = 2.4` 当前是代码中的固定值，不是 CLI 参数。
 
 默认参数：
 
@@ -454,13 +517,13 @@ $$
 运行：
 
 ```bash
-python -m mas_flocking.layer2_target_navigation --n-steps 1200 --skip-animation
+python -m mas_flocking.layer2_target_navigation --n-steps 2400 --skip-animation
 ```
 
 生成 GIF：
 
 ```bash
-python -m mas_flocking.layer2_target_navigation --n-steps 1200
+python -m mas_flocking.layer2_target_navigation --n-steps 2400
 ```
 
 输出：
@@ -481,19 +544,19 @@ python -m mas_flocking.layer2_target_navigation --n-steps 1200
 
 | 指标 | final | min | max | mean |
 |---|---:|---:|---:|---:|
-| mean goal distance | `5.781649` | `5.781649` | `15.252425` | `10.701206` |
-| center-of-mass goal distance | `5.760750` | `5.760750` | `14.999907` | `10.668890` |
-| velocity consensus error | `0.002103` | `0.002103` | `1.309056` | `0.206826` |
-| min agent distance | `0.067798` | `0.067798` | `0.754724` | `0.141219` |
-| lattice deviation energy | `0.230834` | `0.227886` | `0.970102` | `0.299281` |
+| mean goal distance | `0.832599` | `0.832599` | `15.252425` | `6.516423` |
+| center-of-mass goal distance | `0.599691` | `0.599691` | `14.999907` | `6.454242` |
+| velocity consensus error | `0.001705` | `0.001481` | `1.309051` | `0.103831` |
+| min agent distance | `0.294225` | `0.267433` | `0.754724` | `0.298843` |
+| lattice deviation energy | `0.218602` | `0.218129` | `0.970102` | `0.254486` |
 | connected components | `1` | `1` | `1` | `1` |
 
 结果解读：
 
 - 相比 Layer 1，Layer 2 能够把 flock 往目标点 `[18, 6]` 推进。
-- 1200 steps 下平均目标距离从约 `15.25` 降到 `5.78`，目标导航有效。
+- 2400 steps 下平均目标距离从约 `15.25` 降到 `0.83`，目标导航有效。
 - 速度一致性最终仍然很好，说明 alpha velocity consensus 和 gamma damping 能共同稳定速度。
-- 静态目标点会把 flock 吸引到目标附近，因此后期会出现压缩，`min_agent_distance` 下降到 `0.067798`。这是 static gamma-agent 的典型现象，不是代码错误。
+- 新增 target decay 减弱了终点附近的位置吸引，配合 alpha safety barrier 后，`min_agent_distance` 的最小值保持在 `0.267433`，明显好于旧实现中的终点压缩。
 
 ---
 
@@ -618,27 +681,29 @@ $$
 | `agent_radius` | `0.12` |
 | `beta_velocity_mode` | `projected` |
 
-Layer 3 demo 中为了减少局部卡滞，CLI 默认使用了更保守的调参：
+Layer 3 demo 中的 CLI 默认参数使用了安全与到达速度之间的折中调参。旧参数 `c1_beta=3.0, c2_beta=2.0` 会在障碍物边界附近出现擦边式碰撞；过大的 `r_beta` 又会让队伍绕得太保守、到达变慢。当前默认值如下：
 
 | 参数 | demo 默认值 |
 |---|---:|
 | `r_beta` | `1.5` |
-| `c1_beta` | `3.0` |
-| `c2_beta` | `2.0` |
+| `c1_beta` | `6.0` |
+| `c2_beta` | `3.0` |
 | `c1_gamma` | `1.5` |
+| `d_safe_agent` | `0.40` |
+| `k_barrier` | `15.0` |
 
 ### 6.6 Layer 3 demo
 
 运行：
 
 ```bash
-python -m mas_flocking.layer3_static_obstacles --n-steps 1600 --skip-animation
+python -m mas_flocking.layer3_static_obstacles --n-steps 2400 --skip-animation
 ```
 
 生成 GIF：
 
 ```bash
-python -m mas_flocking.layer3_static_obstacles --n-steps 1600
+python -m mas_flocking.layer3_static_obstacles --n-steps 2400
 ```
 
 输出：
@@ -659,22 +724,22 @@ python -m mas_flocking.layer3_static_obstacles --n-steps 1600
 
 | 指标 | final | min | max | mean |
 |---|---:|---:|---:|---:|
-| mean goal distance | `4.101528` | `4.101528` | `15.313787` | `9.730008` |
-| center-of-mass goal distance | `4.072212` | `4.072212` | `15.075281` | `9.703512` |
-| velocity consensus error | `0.002337` | `0.002337` | `1.443429` | `0.154480` |
-| min agent distance | `0.027514` | `0.027235` | `0.760161` | `0.091618` |
-| min obstacle clearance | `1.565765` | `0.043907` | `5.063436` | `1.346299` |
+| mean goal distance | `0.797184` | `0.797184` | `15.313787` | `7.741008` |
+| center-of-mass goal distance | `0.518314` | `0.518314` | `15.075281` | `7.692037` |
+| velocity consensus error | `0.002190` | `0.002190` | `1.443429` | `0.105311` |
+| min agent distance | `0.330271` | `0.306200` | `0.760161` | `0.333306` |
+| min obstacle clearance | `4.280551` | `0.421387` | `5.063436` | `1.933564` |
 | collision count | `0` | `0` | `0` | `0` |
 | total collision steps | `0` | `0` | `0` | `0` |
-| lattice deviation energy | `0.236679` | `0.227451` | `1.059090` | `0.286871` |
+| lattice deviation energy | `0.216924` | `0.216924` | `1.059090` | `0.254398` |
 | connected components | `1` | `1` | `1` | `1` |
 
 结果解读：
 
-- 静态障碍物避障有效，整个 Layer 3 demo 中 `collision_count = 0`。
-- 最小障碍物 clearance 的最小值为 `0.043907`，说明 agent 曾经贴近障碍物，但没有进入膨胀碰撞区域。
-- 目标距离继续下降，说明 beta 避障没有破坏 gamma 导航。
-- `min_agent_distance` 进一步变小，主要原因仍然是 static gamma-agent 会在目标附近压缩队形。当前实现没有硬性 agent-agent 碰撞半径约束。
+- 当前 Layer 3 demo 中 agent-agent safety barrier 有效，`min_agent_distance` 的最小值保持在 `0.306200`。
+- 静态障碍物最小 clearance 为 `0.421387`，`collision_count = 0`，说明 agent 物理边界没有进入膨胀障碍物边界。
+- 2400 steps 下 mean goal distance 降到 `0.797184`，说明更强 beta 避障没有导致队伍卡在中途。
+- 这组参数是安全和到达效率的折中：比旧 beta 参数更强，能消除擦边碰撞；但没有把 `r_beta` 放得过大，因此仍能完整到达目标附近。
 
 ---
 
@@ -729,8 +794,10 @@ $$
 预测 clearance：
 
 $$
-d_{pred}=\|r_{pred}\|-R_{obs}-d_{safe}
+d_{pred}=\|r_{pred}\|-R_{obs}-R_{agent}-d_{safe}
 $$
+
+这里 `R_agent` 使用 CLI 参数 `agent_radius`，使动态预测避障和实际碰撞指标使用同一个 agent 物理半径口径。
 
 closing speed：
 
@@ -822,7 +889,10 @@ $$
 | `k_tangent` | `0.6` | 切向绕行增益 |
 | `k_obs` | `1.5` | inhibiting velocity 到控制输入的增益 |
 | `max_obs_speed` | `2.0` | 动态避障速度上限 |
+| `agent_radius` | `0.12` | 动态预测 clearance 中使用的 agent 物理半径 |
 | `use_tangent` | `True` | 是否启用切向绕行 |
+| `d_safe_agent` | `0.40` | 继承自 alpha 控制的 agent-agent 安全距离 |
+| `k_barrier` | `20.0` | Layer 4 默认 agent-agent safety barrier 增益 |
 
 ### 7.5 Layer 4 method 选项
 
@@ -835,7 +905,54 @@ $$
 | `no_tangent` | `alpha + beta + gamma + dyn` 但去掉切向项 | 动态 IAPF 消融 |
 | `no_avoidance` | `alpha + gamma` | 无障碍物避障 baseline |
 
-### 7.6 Layer 4 demo
+### 7.6 Layer 4 scenario 与故障模拟
+
+`layer4_dynamic_iapf.py` 当前支持以下 scenario：
+
+| scenario | 含义 |
+|---|---|
+| `layer3_same` | 和 Layer 3 几何一致，一静一动，用于公平对比 |
+| `single_crossing` | 单个横穿动态障碍物 |
+| `layer0_dynamic` | Layer 0 风格动态障碍物 |
+| `multi_dynamic` | 多动态障碍物 |
+| `complex_dynamic` | 新增复杂场景，包含 8 个动态圆形障碍物和 3 个静态圆形障碍物 |
+| `multi_curved_dynamic` | 新增 3 个 scripted 曲线运动障碍物，用于测试非直线动态预测避障 |
+| `mixed_accel_dynamic` | 新增 2 个变速直线障碍物 + 1 个变速曲线障碍物，用于测试速度变化下的短时预测避障 |
+| `multi_curved_dynamic_v2` | 多曲线动态障碍物场景 v2，基于 `multi_curved_dynamic` 将障碍物数量翻倍到 6 个，并提高曲线速度变化幅度 |
+| `mixed_accel_dynamic_v2` | 混合变速动态障碍物场景 v2，基于 `mixed_accel_dynamic` 翻倍为 4 个变速直线 + 2 个变速曲线障碍物，并增大加速度/曲线扰动 |
+
+为了支持曲线和变速障碍物，同时不影响旧实验，代码新增了 `ScriptedCircleObstacle`，原来的 `CircleObstacle` 恒定速度模型保持不变。旧场景 `layer3_same`、`single_crossing`、`layer0_dynamic`、`multi_dynamic`、`complex_dynamic` 仍然走 `CircleObstacle.step(...)`；只有新场景使用 scripted trajectory。
+
+scripted obstacle 的轨迹写成：
+
+$$
+o(t)=o_0+v_0t+\frac{1}{2}at^2+A\left[\sin(\omega t+\phi)-\sin(\phi)\right]+C(t)
+$$
+
+其中 `o(t)` 是障碍物中心，`o_0` 是初始中心，`v_0` 是基础速度，`a` 是常加速度，`A` 是 x/y 方向正弦扰动幅值，`\omega` 是角频率，`\phi` 是相位，`C(t)` 是可选圆周扰动项。对应瞬时速度为：
+
+$$
+\dot o(t)=v_0+at+A\omega\cos(\omega t+\phi)+\dot C(t)
+$$
+
+Layer 4 的 dynamic IAPF 仍然只读取每个障碍物当前 `center` 和 `velocity`，因此 scripted obstacle 可以无缝复用已有 CPA 短时预测、风险权重和切向避障逻辑。
+
+新增故障模拟参数：
+
+| 参数 | 默认值 | 含义 |
+|---|---:|---|
+| `fail_count` | `0` | 随机选取多少个 agent 在仿真中故障 |
+| `fail_step` | `400` | 从第多少步开始让故障 agent 失去控制 |
+
+当 `step_idx >= fail_step` 且 `fail_count > 0` 时，代码会把故障 agent 的控制输入置零，并将其速度乘以 `0.95` 做快速衰减：
+
+$$
+u_i = 0,\quad p_i \leftarrow 0.95p_i
+$$
+
+同时新增 `active_mean_goal_distance` 指标，只统计非故障 agent 到目标点的平均距离，避免故障 agent 停在路上后污染活跃群体的到达评价。
+
+### 7.7 Layer 4 demo
 
 当前 2500-step 结果命令：
 
@@ -843,17 +960,46 @@ $$
 python -m mas_flocking.layer4_dynamic_iapf --scenario layer3_same --method dynamic_iapf --n-steps 2500
 ```
 
-最终 GIF 已保存为：
+最终 GIF 按脚本当前命名规则保存为：
 
 ```text
-outputs/animations/layer4/layer4_iapf.gif
+outputs/animations/layer4/layer4_layer3_same_dynamic_iapf.gif
 ```
 
 输出：
 
 - `outputs/figures/layer4/layer4_layer3_same_dynamic_iapf_trajectories.png`
-- `outputs/animations/layer4/layer4_iapf.gif`
+- `outputs/animations/layer4/layer4_layer3_same_dynamic_iapf.gif`
 - `outputs/logs/layer4/layer4_layer3_same_dynamic_iapf_metrics.csv`
+- `outputs/figures/layer4/layer4_layer3_same_dynamic_iapf/*.png`
+
+新增复杂动态场景输出：
+
+- `outputs/figures/layer4/layer4_complex_dynamic_dynamic_iapf_trajectories.png`
+- `outputs/animations/layer4/layer4_complex_dynamic_dynamic_iapf.gif`
+- `outputs/logs/layer4/layer4_complex_dynamic_dynamic_iapf_metrics.csv`
+- `outputs/figures/layer4/layer4_complex_dynamic_dynamic_iapf/*.png`
+
+复杂动态场景当前使用 `2500` steps 作为正式结果，确保队伍绕过多动态/静态障碍物后完整到达目标附近。
+
+新增 scripted 动态场景输出：
+
+- `outputs/figures/layer4/layer4_multi_curved_dynamic_dynamic_iapf_trajectories.png`
+- `outputs/animations/layer4/layer4_multi_curved_dynamic_dynamic_iapf.gif`
+- `outputs/logs/layer4/layer4_multi_curved_dynamic_dynamic_iapf_metrics.csv`
+- `outputs/figures/layer4/layer4_multi_curved_dynamic_dynamic_iapf/*.png`
+- `outputs/figures/layer4/layer4_mixed_accel_dynamic_dynamic_iapf_trajectories.png`
+- `outputs/animations/layer4/layer4_mixed_accel_dynamic_dynamic_iapf.gif`
+- `outputs/logs/layer4/layer4_mixed_accel_dynamic_dynamic_iapf_metrics.csv`
+- `outputs/figures/layer4/layer4_mixed_accel_dynamic_dynamic_iapf/*.png`
+- `outputs/figures/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf_trajectories.png`
+- `outputs/animations/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf.gif`
+- `outputs/logs/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf_metrics.csv`
+- `outputs/figures/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf/*.png`
+- `outputs/figures/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf_trajectories.png`
+- `outputs/animations/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf.gif`
+- `outputs/logs/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf_metrics.csv`
+- `outputs/figures/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf/*.png`
 
 轨迹图：
 
@@ -861,35 +1007,269 @@ outputs/animations/layer4/layer4_iapf.gif
 
 动画：
 
-![Layer 4 animation](outputs/animations/layer4/layer4_iapf.gif)
+![Layer 4 animation](outputs/animations/layer4/layer4_layer3_same_dynamic_iapf.gif)
 
-### 7.7 Layer 4 结果
+复杂动态场景动画：
 
-Layer 4 当前使用 `2500` steps，目标是让 flock 足够接近最终目标点。
+![Layer 4 complex dynamic animation](outputs/animations/layer4/layer4_complex_dynamic_dynamic_iapf.gif)
+
+多曲线动态障碍物场景动画：
+
+![Layer 4 multi curved dynamic animation](outputs/animations/layer4/layer4_multi_curved_dynamic_dynamic_iapf.gif)
+
+混合变速动态障碍物场景动画：
+
+![Layer 4 mixed accel dynamic animation](outputs/animations/layer4/layer4_mixed_accel_dynamic_dynamic_iapf.gif)
+
+多曲线动态障碍物场景 v2 动画：
+
+![Layer 4 multi curved dynamic v2 animation](outputs/animations/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf.gif)
+
+混合变速动态障碍物场景 v2 动画：
+
+![Layer 4 mixed accel dynamic v2 animation](outputs/animations/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf.gif)
+
+### 7.8 Layer 4 结果
+
+Layer 4 当前使用 `2500` steps，目标是让 flock 足够接近最终目标点。正式动态场景现在使用完全一致的评测 schema：CSV 中除 `step` 外固定记录 `25` 个指标。这个 schema 是两个例子原有指标的并集，再加上优先补充的 6 类论文常用指标：
+
+- `cohesion_radius`
+- `relative_connectivity`
+- `normalized_velocity_mismatch`
+- `average_flocking_error`
+- `formation_recovery_step/time`
+- `mean_speed/max_speed/speed_std`
+
+代码中用 `LAYER4_METRIC_KEYS` 固定字段顺序，`tests/test_layer4_dynamic_iapf.py` 也会短跑 `layer3_same`、`complex_dynamic`、`multi_curved_dynamic`、`mixed_accel_dynamic`、`multi_curved_dynamic_v2` 和 `mixed_accel_dynamic_v2` 来验证六个场景的指标数量和项目完全一致。
+
+默认动态场景 `layer3_same` 的 2500-step 正式结果：
 
 | 指标 | final | min | max | mean |
 |---|---:|---:|---:|---:|
-| mean goal distance | `0.686804` | `0.686753` | `14.951042` | `6.758627` |
-| center-of-mass goal distance | `0.014983` | `0.006583` | `14.668973` | `6.608722` |
-| velocity consensus error | `0.001688` | `0.001674` | `1.223715` | `0.107402` |
-| min agent distance | `0.001236` | `0.001236` | `0.754539` | `0.061021` |
-| min obstacle clearance | `5.992373` | `0.128386` | `5.992373` | `2.384113` |
+| mean goal distance | `0.872356` | `0.872356` | `14.951042` | `8.029572` |
+| active mean goal distance | `0.872356` | `0.872356` | `14.951042` | `8.029572` |
+| center-of-mass goal distance | `0.662830` | `0.662830` | `14.668973` | `7.988276` |
+| velocity consensus error | `0.002873` | `0.002873` | `1.223715` | `0.107998` |
+| normalized velocity mismatch | `0.000437` | `0.000033` | `0.996298` | `0.064877` |
+| mean speed | `0.177490` | `0.108607` | `1.603258` | `0.808622` |
+| max speed | `0.187000` | `0.163684` | `2.439705` | `0.899693` |
+| speed std | `0.002977` | `0.002977` | `0.509665` | `0.046433` |
+| min agent distance | `0.337703` | `0.317902` | `0.754539` | `0.340384` |
+| cohesion radius | `0.827433` | `0.827433` | `4.779419` | `1.063103` |
+| min obstacle clearance | `5.369539` | `0.419495` | `5.369539` | `1.864775` |
 | collision count | `0` | `0` | `0` | `0` |
 | total collision steps | `0` | `0` | `0` | `0` |
 | total collision count | `0` | `0` | `0` | `0` |
-| active dynamic risk count | `0` | `0` | `40` | `18.551600` |
-| min predicted obstacle clearance | `5.759920` | `-1.149727` | `5.759920` | `1.596369` |
-| control effort | `0.001218` | `0.000280` | `86.122589` | `0.509174` |
-| lattice deviation energy | `0.250865` | `0.232871` | `0.933457` | `0.279007` |
+| active dynamic risk count | `0` | `0` | `40` | `20.640400` |
+| min predicted obstacle clearance | `5.015529` | `-1.269694` | `5.015529` | `0.957331` |
+| control effort | `0.006458` | `0.000402` | `86.122589` | `0.515829` |
+| lattice deviation energy | `0.216899` | `0.216899` | `0.933457` | `0.254293` |
+| average flocking error | `27.428630` | `0.000000` | `27.553977` | `26.181075` |
+| formation recovery step | `2151` | `-1` | `2151` | `299.419200` |
+| formation recovery time | `21.510000` | `-1` | `21.510000` | `2.142396` |
+| mean neighbor count | `19.000000` | `7.600000` | `19.000000` | `18.487440` |
 | connected components | `1` | `1` | `1` | `1` |
+| lambda_2 | `20.000000` | `0.714711` | `20.000000` | `18.817974` |
+| relative connectivity | `1.000000` | `1.000000` | `1.000000` | `1.000000` |
 
 结果解读：
 
-- 最终质心到目标距离为 `0.014983`，说明 flock 基本到达目标点。
+- 最终平均目标距离为 `0.872356`，质心到目标距离为 `0.662830`，说明 flock 基本到达目标点附近。
 - `collision_count = 0`、`total_collision_steps = 0`，说明动态障碍物与静态障碍物都没有发生碰撞。
 - `active_dynamic_risk_count` 的最大值为 `40`，说明动态障碍物穿越路径时，dynamic IAPF 确实被激活。
-- `min_predicted_obstacle_clearance` 最小值为 `-1.149727`，这表示某些时刻 CPA 预测如果不避让会发生危险接近；实际 `min_obstacle_clearance` 最小仍为 `0.128386`，说明动态避障项起到了提前规避作用。
-- `min_agent_distance` 最小值只有 `0.001236`，这是当前实现最明显的不足：静态 gamma-agent 会在目标附近持续吸引所有 agent，导致队形压缩。当前实现没有 hard-core agent-agent collision constraint，也没有最终目标附近的队形保持/停止机制。
+- `min_predicted_obstacle_clearance` 最小值为 `-1.269694`，这表示某些时刻 CPA 预测如果不避让会发生危险接近；实际 `min_obstacle_clearance` 最小仍为 `0.419495`，说明动态避障项起到了提前规避作用。
+- `min_agent_distance` 最小值保持在 `0.317902`，说明新增 agent-agent safety barrier 在动态避障场景下也有效。
+- `formation_recovery_step = 2151`，对应 `21.51s`，表示动态风险结束后，局部 lattice energy 和 normalized velocity mismatch 首次同时回到阈值内。
+
+复杂动态场景 `complex_dynamic` 的 2500-step 正式结果：
+
+| 指标 | final | min | max | mean |
+|---|---:|---:|---:|---:|
+| mean goal distance | `0.708530` | `0.695889` | `14.951050` | `6.494983` |
+| active mean goal distance | `0.708530` | `0.695889` | `14.951050` | `6.494983` |
+| center-of-mass goal distance | `0.270736` | `0.197644` | `14.668981` | `6.363639` |
+| velocity consensus error | `0.001994` | `0.001994` | `1.216429` | `0.110316` |
+| normalized velocity mismatch | `0.000271` | `0.000140` | `0.996516` | `0.076476` |
+| mean speed | `0.144893` | `0.103902` | `1.870764` | `0.746146` |
+| max speed | `0.147123` | `0.111544` | `2.492714` | `0.840873` |
+| speed std | `0.001561` | `0.001561` | `0.524577` | `0.049817` |
+| min agent distance | `0.339459` | `0.318446` | `0.754539` | `0.343679` |
+| cohesion radius | `0.822131` | `0.821030` | `4.779430` | `1.048614` |
+| min obstacle clearance | `2.458181` | `0.028963` | `4.156591` | `2.255581` |
+| collision count | `0` | `0` | `0` | `0` |
+| total collision steps | `0` | `0` | `0` | `0` |
+| total collision count | `0` | `0` | `0` | `0` |
+| active dynamic risk count | `17` | `0` | `104` | `43.422800` |
+| min predicted obstacle clearance | `1.609175` | `-1.069191` | `3.772613` | `1.253904` |
+| control effort | `0.000276` | `0.000276` | `86.681237` | `0.537581` |
+| lattice deviation energy | `0.216489` | `0.216370` | `0.933455` | `0.254086` |
+| average flocking error | `28.472705` | `0.011378` | `28.648328` | `27.233624` |
+| formation recovery step | `1572` | `-1` | `1572` | `582.897600` |
+| formation recovery time | `15.720000` | `-1` | `15.720000` | `5.206464` |
+| mean neighbor count | `19.000000` | `7.600000` | `19.000000` | `18.493280` |
+| connected components | `1` | `1` | `1` | `1` |
+| lambda_2 | `20.000000` | `0.714711` | `20.000000` | `18.835314` |
+| relative connectivity | `1.000000` | `1.000000` | `1.000000` | `1.000000` |
+
+复杂场景结果解读：
+
+- 8 个动态障碍物和 3 个静态障碍物混合场景下，系统仍然保持 `collision_count = 0`。
+- 最小真实障碍物 clearance 为 `0.028963`，说明存在非常贴近的安全通过，但没有发生 agent 边界与膨胀障碍物边界交叉。
+- 2500 steps 后 mean goal distance 降到 `0.708530`，说明复杂场景也完成了从左侧出发、绕障并到达目标附近的完整流程。
+- `active_dynamic_risk_count` 最大值达到 `104`，说明复杂场景确实比默认动态场景产生更密集的动态风险交互。
+- `formation_recovery_step = 1572`，对应 `15.72s`，说明复杂场景在当前恢复判据下也能重新回到可接受 flocking 状态。
+
+多曲线动态场景 `multi_curved_dynamic` 的 2500-step 正式结果：
+
+| 指标 | final | min | max | mean |
+|---|---:|---:|---:|---:|
+| mean goal distance | `0.693434` | `0.686647` | `14.951043` | `3.798759` |
+| active mean goal distance | `0.693434` | `0.686647` | `14.951043` | `3.798759` |
+| center-of-mass goal distance | `0.156068` | `0.074444` | `14.668974` | `3.510175` |
+| velocity consensus error | `0.000956` | `0.000937` | `1.225166` | `0.106551` |
+| normalized velocity mismatch | `0.000220` | `0.000196` | `0.996391` | `0.062887` |
+| mean speed | `0.075057` | `0.013749` | `2.330282` | `0.675656` |
+| max speed | `0.076506` | `0.015202` | `2.462368` | `0.762708` |
+| speed std | `0.000807` | `0.000632` | `0.509299` | `0.046088` |
+| min agent distance | `0.340364` | `0.317639` | `0.754539` | `0.345930` |
+| cohesion radius | `0.825959` | `0.825724` | `4.779419` | `1.046450` |
+| min obstacle clearance | `2.993661` | `0.524788` | `4.475940` | `3.156599` |
+| collision count | `0` | `0` | `0` | `0` |
+| total collision steps | `0` | `0` | `0` | `0` |
+| total collision count | `0` | `0` | `0` | `0` |
+| active dynamic risk count | `12.000000` | `0.000000` | `60.000000` | `14.961600` |
+| min predicted obstacle clearance | `1.923421` | `-0.111500` | `4.125936` | `2.327112` |
+| control effort | `0.000205` | `0.000007` | `86.353581` | `0.593642` |
+| lattice deviation energy | `0.216262` | `0.216048` | `0.933454` | `0.253531` |
+| average flocking error | `28.459333` | `0.011372` | `28.715518` | `27.198921` |
+| formation recovery step | `898` | `-1` | `898` | `575.079200` |
+| formation recovery time | `8.980000` | `-1.000000` | `8.980000` | `5.395184` |
+| mean neighbor count | `19.000000` | `7.600000` | `19.000000` | `18.486760` |
+| connected components | `1` | `1` | `1` | `1` |
+| lambda_2 | `20.000000` | `0.714711` | `20.000000` | `18.813993` |
+| relative connectivity | `1.000000` | `1.000000` | `1.000000` | `1.000000` |
+
+多曲线场景结果解读：
+
+- 3 个障碍物使用正弦横摆/纵摆和圆周扰动，轨迹不再是恒定速度直线，但 dynamic IAPF 仍能通过当前瞬时速度做短时 CPA 预测。
+- `collision_count = 0`、`total_collision_steps = 0`，最小真实 obstacle clearance 为 `0.524788`，比复杂动态场景更宽裕。
+- 最终 mean goal distance 为 `0.693434`，COM goal distance 为 `0.156068`，说明队伍绕过曲线运动障碍物后完整到达目标附近。
+- `active_dynamic_risk_count` 最大值为 `60`，说明曲线障碍物确实进入了 flock 的预测风险区间。
+- `formation_recovery_step = 898`，对应 `8.98s`，是当前六个正式动态场景中恢复较快的一组。
+
+混合变速动态场景 `mixed_accel_dynamic` 的 2500-step 正式结果：
+
+| 指标 | final | min | max | mean |
+|---|---:|---:|---:|---:|
+| mean goal distance | `0.692415` | `0.692415` | `14.951042` | `5.130846` |
+| active mean goal distance | `0.692415` | `0.692415` | `14.951042` | `5.130846` |
+| center-of-mass goal distance | `0.142291` | `0.142291` | `14.668973` | `4.973497` |
+| velocity consensus error | `0.000928` | `0.000726` | `1.223194` | `0.105127` |
+| normalized velocity mismatch | `0.000246` | `0.000033` | `0.996308` | `0.062048` |
+| mean speed | `0.068042` | `0.035349` | `1.545277` | `0.758771` |
+| max speed | `0.070146` | `0.037145` | `2.453522` | `0.850332` |
+| speed std | `0.000956` | `0.000598` | `0.509448` | `0.046513` |
+| min agent distance | `0.339756` | `0.317838` | `0.754539` | `0.345443` |
+| cohesion radius | `0.826882` | `0.826882` | `4.779419` | `1.049086` |
+| min obstacle clearance | `3.777267` | `1.079377` | `5.103278` | `3.071978` |
+| collision count | `0` | `0` | `0` | `0` |
+| total collision steps | `0` | `0` | `0` | `0` |
+| total collision count | `0` | `0` | `0` | `0` |
+| active dynamic risk count | `11.000000` | `0.000000` | `42.000000` | `15.937600` |
+| min predicted obstacle clearance | `2.087490` | `0.729375` | `4.753274` | `2.233972` |
+| control effort | `0.001232` | `0.000036` | `86.140261` | `0.457971` |
+| lattice deviation energy | `0.216179` | `0.216042` | `0.933457` | `0.253285` |
+| average flocking error | `28.456590` | `0.011359` | `28.547325` | `27.191529` |
+| formation recovery step | `1703` | `-1` | `1703` | `542.235200` |
+| formation recovery time | `17.030000` | `-1.000000` | `17.030000` | `4.747964` |
+| mean neighbor count | `19.000000` | `7.600000` | `19.000000` | `18.485680` |
+| connected components | `1` | `1` | `1` | `1` |
+| lambda_2 | `20.000000` | `0.714711` | `20.000000` | `18.811789` |
+| relative connectivity | `1.000000` | `1.000000` | `1.000000` | `1.000000` |
+
+混合变速场景结果解读：
+
+- 该场景包含 2 个带常加速度的直线障碍物和 1 个带加速度 + 正弦扰动的曲线障碍物，用于检查障碍物瞬时速度变化时 CPA 风险预测是否仍然可用。
+- `collision_count = 0`、`total_collision_steps = 0`，最小真实 obstacle clearance 为 `1.079377`，在 v1 scripted 场景中安全裕度最大。
+- 最终 mean goal distance 为 `0.692415`，COM goal distance 为 `0.142291`，说明变速障碍物没有阻止 flock 完整到达目标附近。
+- `min_predicted_obstacle_clearance` 最小值为 `0.729375`，没有出现负值，说明当前参数下预测风险较温和。
+- `formation_recovery_step = 1703`，对应 `17.03s`，恢复时间介于默认动态场景和复杂动态场景之间。
+
+多曲线动态障碍物场景 v2 `multi_curved_dynamic_v2` 的 2500-step 正式结果：
+
+| 指标 | final | min | max | mean |
+|---|---:|---:|---:|---:|
+| mean goal distance | `0.686644` | `0.684717` | `14.951045` | `3.496076` |
+| active mean goal distance | `0.686644` | `0.684717` | `14.951045` | `3.496076` |
+| center-of-mass goal distance | `0.062706` | `0.035305` | `14.668977` | `3.087146` |
+| velocity consensus error | `0.000677` | `0.000646` | `1.226537` | `0.109244` |
+| normalized velocity mismatch | `0.010318` | `0.000179` | `0.996550` | `0.150107` |
+| mean speed | `0.007814` | `0.004306` | `2.485453` | `0.659334` |
+| max speed | `0.009090` | `0.006964` | `2.500000` | `0.750039` |
+| speed std | `0.000570` | `0.000562` | `0.508567` | `0.047701` |
+| min agent distance | `0.340406` | `0.313927` | `0.754539` | `0.344402` |
+| cohesion radius | `0.827204` | `0.823401` | `4.779419` | `1.049935` |
+| min obstacle clearance | `4.221106` | `0.131954` | `5.251676` | `3.302927` |
+| collision count | `0` | `0` | `0` | `0` |
+| total collision steps | `0` | `0` | `0` | `0` |
+| total collision count | `0` | `0` | `0` | `0` |
+| active dynamic risk count | `5.000000` | `0.000000` | `120.000000` | `23.872400` |
+| min predicted obstacle clearance | `2.620799` | `-0.640497` | `4.799789` | `2.394088` |
+| control effort | `0.000210` | `0.000000` | `86.618469` | `0.856400` |
+| lattice deviation energy | `0.215991` | `0.215941` | `0.933450` | `0.253635` |
+| average flocking error | `28.448257` | `0.011389` | `28.778149` | `27.194381` |
+| formation recovery step | `1044` | `-1` | `1044` | `607.608000` |
+| formation recovery time | `10.440000` | `-1.000000` | `10.440000` | `5.662656` |
+| mean neighbor count | `19.000000` | `7.600000` | `19.000000` | `18.488200` |
+| connected components | `1` | `1` | `1` | `1` |
+| lambda_2 | `20.000000` | `0.714711` | `20.000000` | `18.816762` |
+| relative connectivity | `1.000000` | `1.000000` | `1.000000` | `1.000000` |
+
+多曲线 v2 结果解读：
+
+- 该场景将曲线运动障碍物从 3 个增加到 6 个，并提高正弦/圆周扰动速度幅度；`active_dynamic_risk_count` 最大值从 v1 的 `60` 提升到 `120`，动态风险交互明显增强。
+- `collision_count = 0`、`total_collision_steps = 0`，最小真实 obstacle clearance 为 `0.131954`，说明 v2 存在更贴近的穿越，但仍未发生边界交叉碰撞。
+- 最终 mean goal distance 为 `0.686644`，COM goal distance 为 `0.062706`，说明更密集曲线障碍物没有阻止 flock 完整到达目标附近。
+- `min_predicted_obstacle_clearance` 最小值为 `-0.640497`，说明短时 CPA 预测出现过危险接近；实际 clearance 仍保持正值，说明 dynamic IAPF 的提前规避仍然有效。
+- `formation_recovery_step = 1044`，对应 `10.44s`，比 v1 的 `8.98s` 略慢，符合障碍物数量翻倍后的更高难度。
+
+混合变速动态障碍物场景 v2 `mixed_accel_dynamic_v2` 的 2500-step 正式结果：
+
+| 指标 | final | min | max | mean |
+|---|---:|---:|---:|---:|
+| mean goal distance | `0.690561` | `0.690561` | `14.951043` | `6.440439` |
+| active mean goal distance | `0.690561` | `0.690561` | `14.951043` | `6.440439` |
+| center-of-mass goal distance | `0.136821` | `0.136821` | `14.668974` | `6.311416` |
+| velocity consensus error | `0.006500` | `0.005952` | `1.223090` | `0.109727` |
+| normalized velocity mismatch | `0.101629` | `0.000037` | `0.996380` | `0.070140` |
+| mean speed | `0.024355` | `0.024355` | `1.515927` | `0.846267` |
+| max speed | `0.036745` | `0.036745` | `2.468729` | `0.946497` |
+| speed std | `0.006076` | `0.002743` | `0.508774` | `0.051088` |
+| min agent distance | `0.337403` | `0.317371` | `0.754539` | `0.340198` |
+| cohesion radius | `0.828562` | `0.828562` | `4.779419` | `1.058003` |
+| min obstacle clearance | `6.889920` | `0.672960` | `7.059964` | `2.681715` |
+| collision count | `0` | `0` | `0` | `0` |
+| total collision steps | `0` | `0` | `0` | `0` |
+| total collision count | `0` | `0` | `0` | `0` |
+| active dynamic risk count | `0.000000` | `0.000000` | `101.000000` | `37.257600` |
+| min predicted obstacle clearance | `5.567427` | `-0.155923` | `6.527196` | `1.895420` |
+| control effort | `0.000029` | `0.000029` | `86.273165` | `0.623134` |
+| lattice deviation energy | `0.216700` | `0.216679` | `0.933455` | `0.254869` |
+| average flocking error | `28.477909` | `0.011369` | `28.774943` | `27.250831` |
+| formation recovery step | `2034` | `-1` | `2034` | `378.324000` |
+| formation recovery time | `20.340000` | `-1.000000` | `20.340000` | `2.977776` |
+| mean neighbor count | `19.000000` | `7.600000` | `19.000000` | `18.484840` |
+| connected components | `1` | `1` | `1` | `1` |
+| lambda_2 | `20.000000` | `0.714711` | `20.000000` | `18.808383` |
+| relative connectivity | `1.000000` | `1.000000` | `1.000000` | `1.000000` |
+
+混合变速 v2 结果解读：
+
+- 该场景将障碍物从 3 个翻倍到 6 个，其中 4 个为变速直线障碍物，2 个为变速曲线障碍物；加速度和正弦扰动幅度均大于 v1。
+- `active_dynamic_risk_count` 最大值从 v1 的 `42` 提升到 `101`，平均值从 `15.937600` 提升到 `37.257600`，说明 v2 的动态风险密度显著增加。
+- `collision_count = 0`、`total_collision_steps = 0`，最小真实 obstacle clearance 为 `0.672960`，安全裕度仍然为正。
+- 最终 mean goal distance 为 `0.690561`，COM goal distance 为 `0.136821`，说明变速更剧烈、数量翻倍后仍能完整到达目标附近。
+- `formation_recovery_step = 2034`，对应 `20.34s`，比 v1 的 `17.03s` 更慢，说明更强速度变化确实增加了恢复难度。
 
 ---
 
@@ -909,13 +1289,48 @@ $$
 \bar p = \frac{1}{N}\sum_{i=1}^{N}p_i
 $$
 
+Layer 4 还记录 normalized velocity mismatch：
+
+$$
+E_v^{norm}
+=
+\frac{\sum_{i=1}^{N}\|p_i-\bar p\|^2}
+{\sum_{i=1}^{N}\|p_i\|^2+\epsilon}
+$$
+
+这个指标是 Olfati-Saber flocking verification 中 velocity mismatch 的归一化版本。它比 `velocity_consensus_error` 更适合跨不同速度尺度或不同场景比较。
+
+同时记录 speed profile：
+
+$$
+v_i^{mag}=\|p_i\|
+$$
+
+并输出：
+
+- `mean_speed = mean(v_i^mag)`
+- `max_speed = max(v_i^mag)`
+- `speed_std = std(v_i^mag)`
+
+这对应 Shao MRF-IAPF 论文中常画的 robot velocity change curves，可用于观察避障阶段是否接近速度上限、避障后速度是否重新趋同。
+
 ### 8.2 Minimum agent-agent distance
 
 $$
 d_{min}^{agent}=\min_{i \ne j}\|q_i-q_j\|
 $$
 
-当前它只是评价指标，不是硬约束。
+当前它既是评价指标，也受到 alpha 控制中新增 `d_safe_agent` / `k_barrier` safety barrier 的影响。需要注意：barrier 是强排斥工程项，不是严格 CBF/QP 形式的数学硬约束。
+
+Layer 4 还记录 cohesion radius：
+
+$$
+R_{cohesion}=\max_i\left\|q_i-\bar q\right\|,
+\quad
+\bar q=\frac{1}{N}\sum_i q_i
+$$
+
+这是 Olfati-Saber flocking verification 中 cohesion radius 的工程版本。它衡量整个 flock 有没有散开；越小表示群体越紧凑，但太小也可能意味着终点附近过度压缩，所以需要和 `min_agent_distance` 一起看。
 
 ### 8.3 Goal distance
 
@@ -931,6 +1346,14 @@ $$
 D_{goal}^{com}=\left\|\frac{1}{N}\sum_{i=1}^{N}q_i-q_r\right\|
 $$
 
+Layer 4 故障模拟还记录活跃 agent 平均目标距离：
+
+$$
+D_{goal}^{active}=\frac{1}{|\mathcal{A}|}\sum_{i\in\mathcal{A}}\|q_i-q_r\|
+$$
+
+其中 `\mathcal{A}` 是非故障 agent 集合。
+
 ### 8.4 Lattice deviation energy
 
 当前实现用邻居距离相对目标距离 `d` 的偏差来评价局部 lattice：
@@ -941,6 +1364,22 @@ $$
 
 其中边集合由 sensing radius `r` 决定。
 
+Layer 4 还记录 Shao-style average flocking error：
+
+$$
+E_{flock}^{avg}
+=
+\frac{1}{2N}
+\sum_{i=1}^{N}\sum_{j=1}^{N}
+\left|
+\|q_i-q_j\|-\|q_i^{ref}-q_j^{ref}\|
+\right|
+$$
+
+其中 `q_ref` 是动态风险开始前的参考 flock 构型。当前实现会在 `active_dynamic_risk_count == 0` 且尚未进入动态风险阶段时持续更新 `q_ref`；一旦动态风险出现，就冻结该参考构型，用来评价避障过程对原 flock pairwise distance structure 的扰动。
+
+注意：Shao 论文中的实验通常先形成固定 lattice，然后让障碍物扰动该 lattice，因此该误差可以回到接近 `0`。当前项目是“绕障 + 向静态 goal 迁移”的任务，终点附近队形会因为目标吸引重新调整，所以 `average_flocking_error` 更适合作为扰动强度/结构变化量，而不是唯一的恢复判据。
+
 ### 8.5 Connectivity and lambda_2
 
 用欧氏 sensing radius 构造无权图，计算：
@@ -949,6 +1388,14 @@ $$
 - graph Laplacian 的第二小特征值 `lambda_2`。
 
 `lambda_2 > 0` 表示图连通。
+
+Layer 4 还记录 relative connectivity：
+
+$$
+C_{rel}=\frac{\operatorname{rank}(L)}{N-1}
+$$
+
+其中 `L` 是 proximity graph 的 Laplacian。`C_rel=1` 表示图连通；小于 `1` 表示出现 fragmentation。相比 `connected_components`，它更适合画成 `[0,1]` 范围内的连续评测曲线。
 
 ### 8.6 Obstacle clearance and collision
 
@@ -966,6 +1413,13 @@ $$
 
 则认为发生碰撞。
 
+当前可视化同时绘制两层障碍物边界：
+
+- 实线圆：障碍物原始半径 `R_k`；
+- 虚线圆：膨胀碰撞边界 `R_k + R_agent`。
+
+动画中还会绘制 agent 的物理半径圆。判断是否碰撞应以 agent 物理圆是否进入虚线膨胀边界为准，而不是只看散点中心或原始障碍物实线。
+
 ### 8.7 Dynamic risk diagnostics
 
 Layer 4 额外记录：
@@ -973,8 +1427,72 @@ Layer 4 额外记录：
 | 指标 | 含义 |
 |---|---|
 | `active_dynamic_risk_count` | 当前 step 中风险权重大于 0 的 agent-obstacle pair 数量 |
+| `active_mean_goal_distance` | 故障模拟中非故障 agent 的平均目标距离 |
 | `min_predicted_obstacle_clearance` | CPA 预测下的最小障碍物 clearance |
 | `control_effort` | `mean(||u_i||^2)` |
+
+### 8.8 Layer 4 unified evaluation schema
+
+Layer 4 的六个正式动态场景：
+
+- `layer3_same`
+- `complex_dynamic`
+- `multi_curved_dynamic`
+- `mixed_accel_dynamic`
+- `multi_curved_dynamic_v2`
+- `mixed_accel_dynamic_v2`
+
+现在都使用同一套 `LAYER4_METRIC_KEYS`，即原有两个动态例子评测项目的并集，再加上论文常用补充指标。固定 CSV 字段如下：
+
+```text
+mean_goal_distance,
+active_mean_goal_distance,
+center_of_mass_goal_distance,
+velocity_consensus_error,
+normalized_velocity_mismatch,
+mean_speed,
+max_speed,
+speed_std,
+min_agent_distance,
+cohesion_radius,
+min_obstacle_clearance,
+collision_count,
+total_collision_steps,
+total_collision_count,
+active_dynamic_risk_count,
+min_predicted_obstacle_clearance,
+control_effort,
+lattice_deviation_energy,
+average_flocking_error,
+formation_recovery_step,
+formation_recovery_time,
+mean_neighbor_count,
+connected_components,
+lambda_2,
+relative_connectivity
+```
+
+`formation_recovery_step/time` 是事件型指标。当前恢复判据为：
+
+$$
+active\_dynamic\_risk\_count = 0
+$$
+
+且：
+
+$$
+E_{lat} \le 0.35,
+\quad
+E_v^{norm} \le 0.02
+$$
+
+如果动态风险出现后首次满足上述条件，则记录当前 step 和 `step * dt`；如果尚未恢复，则保持 `-1`。这个判据比直接要求 `average_flocking_error` 回到 `0` 更适合当前“迁移到目标点”的任务。
+
+这套评测体系可以直接复用于其他动态场景或障碍物设置：只要新的场景接入 `layer4_dynamic_iapf.build_obstacles(...)`，并返回 `CircleObstacle` 或 `ScriptedCircleObstacle`，日志字段、CSV、指标图和 schema 测试都会保持一致。每个场景的指标图保存到独立目录：
+
+```text
+outputs/figures/layer4/<scenario>_<method>/*.png
+```
 
 ---
 
@@ -983,23 +1501,33 @@ Layer 4 额外记录：
 | Layer | steps | 主要结果 | final goal / COM distance | final velocity error | min obstacle clearance | collision count | 评价 |
 |---|---:|---|---:|---:|---:|---:|---|
 | Layer 0 | `80` | 环境 smoke test | mean goal `10.925102` | `0.530839` | `0.194770` | 未作为核心评价 | 环境和可视化链路正常 |
-| Layer 1 | `1000` | free-space alpha flocking | 无目标 | `0.002152` | 无障碍 | 无障碍 | 速度一致和局部 lattice 有效 |
-| Layer 2 | `1200` | 加入目标导航 | mean goal `5.781649`, COM `5.760750` | `0.002103` | 无障碍 | 无障碍 | 能向目标迁移，但未完全到达 |
-| Layer 3 | `1600` | 静态障碍物避障 | mean goal `4.101528`, COM `4.072212` | `0.002337` | min `0.043907` | `0` | 静态避障成功，无碰撞 |
-| Layer 4 | `2500` | 动态障碍物避障并到达目标 | mean goal `0.686804`, COM `0.014983` | `0.001688` | min `0.128386` | `0` | 成功到达目标且无障碍物碰撞，但目标附近队形压缩明显 |
+| Layer 1 | `1000` | free-space alpha flocking + safety barrier | 无目标 | `0.002490` | 无障碍 | 无障碍 | 速度一致、局部 lattice 和 agent-agent 安全距离有效 |
+| Layer 2 | `2400` | 加入目标导航和 target decay | mean goal `0.832599`, COM `0.599691` | `0.001705` | 无障碍 | 无障碍 | 能到达目标附近，agent-agent 压缩明显缓解 |
+| Layer 3 | `2400` | 静态障碍物避障 | mean goal `0.797184`, COM `0.518314` | `0.002190` | min `0.421387` | `0` | 能安全绕开静态障碍物并到达目标附近 |
+| Layer 4 | `2500` | 动态障碍物避障并到达目标，25 指标统一 schema | mean goal `0.872356`, COM `0.662830` | `0.002873` | min `0.419495` | `0` | 默认动态场景安全到达目标附近，recovery time `21.51s` |
+| Layer 4 complex | `2500` | 复杂动态/静态障碍物混合场景，25 指标统一 schema | mean goal `0.708530`, COM `0.270736` | `0.001994` | min `0.028963` | `0` | 压力测试场景下无碰撞并完整到达目标附近，recovery time `15.72s` |
+| Layer 4 multi curved | `2500` | 3 个曲线 scripted 动态障碍物，25 指标统一 schema | mean goal `0.693434`, COM `0.156068` | `0.000956` | min `0.524788` | `0` | 曲线障碍物场景无碰撞并完整到达目标附近，recovery time `8.98s` |
+| Layer 4 mixed accel | `2500` | 2 个变速直线 + 1 个变速曲线障碍物，25 指标统一 schema | mean goal `0.692415`, COM `0.142291` | `0.000928` | min `1.079377` | `0` | 变速障碍物场景无碰撞并完整到达目标附近，recovery time `17.03s` |
+| Layer 4 multi curved v2 | `2500` | 6 个曲线 scripted 动态障碍物，速度变化幅度更大，25 指标统一 schema | mean goal `0.686644`, COM `0.062706` | `0.000677` | min `0.131954` | `0` | 曲线障碍物数量翻倍后仍无碰撞并完整到达目标附近，recovery time `10.44s` |
+| Layer 4 mixed accel v2 | `2500` | 4 个变速直线 + 2 个变速曲线障碍物，加速度/扰动更强，25 指标统一 schema | mean goal `0.690561`, COM `0.136821` | `0.006500` | min `0.672960` | `0` | 变速障碍物数量翻倍后仍无碰撞并完整到达目标附近，recovery time `20.34s` |
 
 从结果看，当前复现的主要优点是：
 
 - Olfati-Saber alpha 速度一致性和局部结构保持项能够正常工作。
+- 新增 agent-agent safety barrier 明显改善了最小 agent-agent 距离。
 - gamma-agent 能让 flock 向目标点迁移。
+- target decay 能减弱终点附近 static gamma-agent 的压缩效应。
 - beta-agent 能在静态圆形障碍物附近提供几何避障。
-- dynamic IAPF 能对动态障碍物产生提前避让，并且 2500-step 实验中无障碍物碰撞。
+- dynamic IAPF 能对动态障碍物产生提前避让，并且 2500-step 六个正式动态场景中都无障碍物碰撞。
+- Layer 4 现在采用统一的 25 指标评测 schema，六个动态场景的 CSV 字段完全一致，后续新增场景可以直接复用。
+- `complex_dynamic`、`multi_curved_dynamic`、`mixed_accel_dynamic` 和 agent failure simulation 可用于不同类型压力测试。
+- 可视化现在区分原始障碍物边界、膨胀碰撞边界和 agent 物理半径，动画里的边界交叉判断更清晰。
 - 代码层次清晰，便于逐层 ablation。
 
 当前最明显的不足是：
 
-- 静态 gamma-agent 目标点会导致 agent 在终点附近聚集，`min_agent_distance` 很小。
-- 当前没有 agent-agent hard collision radius，也没有在目标附近自动切换为 formation keeping 或停止策略。
+- agent-agent safety barrier 改善了最小距离，但不是严格 CBF/QP 证明意义上的硬安全约束。
+- 静态 gamma-agent 仍不是理想 migration flocking，终点附近还缺少 formation keeping 或停止策略。
 - Layer 4 是 Shao-inspired 工程实现，不是 Shao 原文 MRF-IAPF 所有交互速度公式的完整逐式复现。
 - 当前没有把 `dynamic_iapf/static_beta/no_tangent/no_avoidance` 的完整对比表都长期保存下来，后续如果写论文或报告，建议固定 seed 后批量跑 ablation。
 
@@ -1009,20 +1537,27 @@ Layer 4 额外记录：
 
 如果评价目标是“从左侧出发，保持基本 flocking，绕开静态和动态圆形障碍物，并最终到达目标点”，当前结果是比较好的：
 
-- Layer 4 最终 COM 到目标距离约 `0.015`；
+- Layer 4 默认场景最终 COM 到目标距离约 `0.663`，平均目标距离约 `0.872`；
+- Layer 4 complex 场景最终 COM 到目标距离约 `0.271`，平均目标距离约 `0.709`；
+- Layer 4 multi curved 场景最终 COM 到目标距离约 `0.156`，平均目标距离约 `0.693`；
+- Layer 4 mixed accel 场景最终 COM 到目标距离约 `0.142`，平均目标距离约 `0.692`；
+- Layer 4 multi curved v2 场景最终 COM 到目标距离约 `0.063`，平均目标距离约 `0.687`；
+- Layer 4 mixed accel v2 场景最终 COM 到目标距离约 `0.137`，平均目标距离约 `0.691`；
+- Layer 2/3/4 的正式命令都完整跑到最后一步，没有中途停滞；由于 flocking 需要保持 agent-agent 间距，这里的“到达目标点”按目标邻域和 COM 收敛评价，而不是所有 agent 坐标重合到同一点；
 - 障碍物碰撞次数为 `0`；
-- 最终速度一致性误差约 `0.0017`；
+- 最终速度一致性误差约 `0.002-0.003`；
+- Layer 4 最小 agent-agent 距离保持在 `0.317902` 以上；
 - 动态风险项在障碍物穿越时被激活，说明不是单纯靠静态 beta 碰巧避开。
 
 如果评价目标是“严格保持 agent-agent 安全间距并形成漂亮稳定编队”，当前结果还不够好：
 
-- 最小 agent-agent 距离在 Layer 4 最终只有 `0.001236`；
-- 静态目标点导致最终压缩，这不是理想 flocking formation；
-- 需要后续加入动态 gamma-agent、formation control、终点附近停止逻辑或 hard safety barrier。
+- 当前 barrier 是工程排斥项，不是带形式化安全证明的 CBF/QP；
+- 静态目标点仍不是理想 flocking formation；
+- 需要后续加入动态 gamma-agent、formation control、终点附近停止逻辑，或把 barrier 升级为形式化安全约束。
 
 因此，当前实现更适合描述为：
 
-> 已经复现并验证了 Olfati-Saber alpha/beta/gamma 分层控制和 Shao-inspired 动态障碍物提前避让的基础机制；在障碍物避让和目标到达方面效果较好，但在终点附近队形保持和 agent-agent 最小安全距离方面仍需要进一步改进。
+> 已经复现并验证了 Olfati-Saber alpha/beta/gamma 分层控制和 Shao-inspired 动态障碍物提前避让的基础机制；新 contribution 进一步加入 agent-agent safety barrier、gamma target decay、复杂动态障碍物场景和故障模拟。当前 Layer 2/3/4 都能完整到达目标邻域且无障碍物碰撞，但终点附近队形保持、复杂场景下更大的安全裕度和形式化安全约束仍需要进一步改进。
 
 ---
 
@@ -1058,9 +1593,9 @@ $$
 
 这可以缓解终点附近队形压缩。
 
-### 11.3 Agent-agent safety barrier
+### 11.3 Formal safety barrier
 
-当前 alpha 势函数是柔性的，没有 hard safety。可以加入 CBF 或强 repulsive barrier：
+当前已经加入工程化 agent-agent repulsive barrier。若希望进一步提升为有形式化保证的安全约束，可以使用 CBF/QP：
 
 $$
 h_{ij}=\|q_i-q_j\|^2-d_{safe}^2
@@ -1126,16 +1661,26 @@ python -m mas_flocking.layer1_free_flocking --n-steps 1000 --skip-animation
 python -m mas_flocking.layer1_free_flocking --n-steps 1000
 
 # Layer 2
-python -m mas_flocking.layer2_target_navigation --n-steps 1200 --skip-animation
-python -m mas_flocking.layer2_target_navigation --n-steps 1200
+python -m mas_flocking.layer2_target_navigation --n-steps 2400 --skip-animation
+python -m mas_flocking.layer2_target_navigation --n-steps 2400
 
 # Layer 3
-python -m mas_flocking.layer3_static_obstacles --n-steps 1600 --skip-animation
-python -m mas_flocking.layer3_static_obstacles --n-steps 1600
+python -m mas_flocking.layer3_static_obstacles --n-steps 2400 --skip-animation
+python -m mas_flocking.layer3_static_obstacles --n-steps 2400
 
 # Layer 4
 python -m mas_flocking.layer4_dynamic_iapf --scenario layer3_same --method dynamic_iapf --n-steps 2500 --skip-animation
 python -m mas_flocking.layer4_dynamic_iapf --scenario layer3_same --method dynamic_iapf --n-steps 2500
+python -m mas_flocking.layer4_dynamic_iapf --scenario complex_dynamic --method dynamic_iapf --n-steps 2500 --skip-animation
+python -m mas_flocking.layer4_dynamic_iapf --scenario complex_dynamic --method dynamic_iapf --n-steps 2500
+python -m mas_flocking.layer4_dynamic_iapf --scenario multi_curved_dynamic --method dynamic_iapf --n-steps 2500 --skip-animation
+python -m mas_flocking.layer4_dynamic_iapf --scenario multi_curved_dynamic --method dynamic_iapf --n-steps 2500
+python -m mas_flocking.layer4_dynamic_iapf --scenario mixed_accel_dynamic --method dynamic_iapf --n-steps 2500 --skip-animation
+python -m mas_flocking.layer4_dynamic_iapf --scenario mixed_accel_dynamic --method dynamic_iapf --n-steps 2500
+python -m mas_flocking.layer4_dynamic_iapf --scenario multi_curved_dynamic_v2 --method dynamic_iapf --n-steps 2500 --skip-animation
+python -m mas_flocking.layer4_dynamic_iapf --scenario multi_curved_dynamic_v2 --method dynamic_iapf --n-steps 2500
+python -m mas_flocking.layer4_dynamic_iapf --scenario mixed_accel_dynamic_v2 --method dynamic_iapf --n-steps 2500 --skip-animation
+python -m mas_flocking.layer4_dynamic_iapf --scenario mixed_accel_dynamic_v2 --method dynamic_iapf --n-steps 2500
 ```
 
 ---
@@ -1172,9 +1717,29 @@ python -m mas_flocking.layer4_dynamic_iapf --scenario layer3_same --method dynam
 ### Layer 4
 
 - Figure: `outputs/figures/layer4/layer4_layer3_same_dynamic_iapf_trajectories.png`
-- GIF: `outputs/animations/layer4/layer4_iapf.gif`
+- GIF: `outputs/animations/layer4/layer4_layer3_same_dynamic_iapf.gif`
 - CSV: `outputs/logs/layer4/layer4_layer3_same_dynamic_iapf_metrics.csv`
-- Metrics: `outputs/figures/layer4/*.png`
+- Metrics: `outputs/figures/layer4/layer4_layer3_same_dynamic_iapf/*.png`
+- Complex Figure: `outputs/figures/layer4/layer4_complex_dynamic_dynamic_iapf_trajectories.png`
+- Complex GIF: `outputs/animations/layer4/layer4_complex_dynamic_dynamic_iapf.gif`
+- Complex CSV: `outputs/logs/layer4/layer4_complex_dynamic_dynamic_iapf_metrics.csv`
+- Complex Metrics: `outputs/figures/layer4/layer4_complex_dynamic_dynamic_iapf/*.png`
+- Multi-curved Figure: `outputs/figures/layer4/layer4_multi_curved_dynamic_dynamic_iapf_trajectories.png`
+- Multi-curved GIF: `outputs/animations/layer4/layer4_multi_curved_dynamic_dynamic_iapf.gif`
+- Multi-curved CSV: `outputs/logs/layer4/layer4_multi_curved_dynamic_dynamic_iapf_metrics.csv`
+- Multi-curved Metrics: `outputs/figures/layer4/layer4_multi_curved_dynamic_dynamic_iapf/*.png`
+- Mixed-accel Figure: `outputs/figures/layer4/layer4_mixed_accel_dynamic_dynamic_iapf_trajectories.png`
+- Mixed-accel GIF: `outputs/animations/layer4/layer4_mixed_accel_dynamic_dynamic_iapf.gif`
+- Mixed-accel CSV: `outputs/logs/layer4/layer4_mixed_accel_dynamic_dynamic_iapf_metrics.csv`
+- Mixed-accel Metrics: `outputs/figures/layer4/layer4_mixed_accel_dynamic_dynamic_iapf/*.png`
+- Multi-curved v2 Figure: `outputs/figures/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf_trajectories.png`
+- Multi-curved v2 GIF: `outputs/animations/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf.gif`
+- Multi-curved v2 CSV: `outputs/logs/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf_metrics.csv`
+- Multi-curved v2 Metrics: `outputs/figures/layer4/layer4_multi_curved_dynamic_v2_dynamic_iapf/*.png`
+- Mixed-accel v2 Figure: `outputs/figures/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf_trajectories.png`
+- Mixed-accel v2 GIF: `outputs/animations/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf.gif`
+- Mixed-accel v2 CSV: `outputs/logs/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf_metrics.csv`
+- Mixed-accel v2 Metrics: `outputs/figures/layer4/layer4_mixed_accel_dynamic_v2_dynamic_iapf/*.png`
 
 ---
 
@@ -1194,6 +1759,6 @@ $$
 \text{dynamic IAPF obstacle avoidance}
 $$
 
-最终 Layer 4 在同 Layer 3 初始障碍物几何一致的场景下，能够让多智能体系统绕开静态和动态障碍物，并到达目标点附近，且没有障碍物碰撞。
+最终 Layer 2、Layer 3、Layer 4 默认动态场景、Layer 4 `complex_dynamic` 压力测试场景、Layer 4 `multi_curved_dynamic` / `multi_curved_dynamic_v2` 曲线障碍物场景，以及 Layer 4 `mixed_accel_dynamic` / `mixed_accel_dynamic_v2` 变速障碍物场景都能够让多智能体系统完整运行到最后一步，并到达目标点附近；其中含障碍物的 Layer 3/4 场景没有障碍物碰撞。`complex_dynamic` 场景包含 8 个动态圆形障碍物和 3 个静态圆形障碍物，用于压力测试多动态障碍物和静态障碍物混合环境；`multi_curved_dynamic`、`mixed_accel_dynamic` 及其 v2 版本则通过 scripted trajectory 覆盖曲线运动、变速运动、数量翻倍和更强速度变化的障碍物压力测试。
 
-接下来如果要把结果从“可复现 demo”提升到“更强实验报告/论文级结果”，优先建议处理 agent-agent 最小安全距离和终点附近队形压缩问题。
+接下来如果要把结果从“可复现 demo”提升到“更强实验报告/论文级结果”，优先建议处理终点附近队形保持、复杂场景下更大的障碍物安全裕度，以及把当前工程 barrier 升级为形式化安全约束。

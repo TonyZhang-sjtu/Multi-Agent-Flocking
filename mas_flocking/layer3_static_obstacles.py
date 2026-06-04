@@ -59,8 +59,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--c1-gamma", type=float, default=1.5)
     parser.add_argument("--c2-gamma", type=float, default=1.2)
     parser.add_argument("--r-beta", type=float, default=1.5)
-    parser.add_argument("--c1-beta", type=float, default=3.0)
-    parser.add_argument("--c2-beta", type=float, default=2.0)
+    parser.add_argument("--c1-beta", type=float, default=6.0)
+    parser.add_argument("--c2-beta", type=float, default=3.0)
     parser.add_argument("--agent-radius", type=float, default=0.12)
     parser.add_argument("--beta-velocity-mode", choices=["projected", "zero"], default="projected")
     parser.add_argument("--d-safe-agent", type=float, default=0.40)
@@ -74,7 +74,7 @@ def write_metrics_csv(logs: Dict[str, List[float]], path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     keys = list(logs.keys())
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")
         writer.writerow(["step"] + keys)
         for idx in range(len(next(iter(logs.values())))):
             writer.writerow([idx] + [logs[key][idx] for key in keys])
@@ -227,6 +227,7 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         goal=gamma_traj[-1] if gamma_traj else goal,
         obstacles=env.obstacles,
         world_size=world_size,
+        agent_radius=args.agent_radius,
         save_path=os.path.join(figures_dir, f"layer3_static_obstacles_{suffix}_trajectories.png"),
         title="Layer 3 Static Obstacle Flocking" + (" Baseline" if args.disable_beta else ""),
     )
@@ -240,6 +241,7 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
             goal=gamma_traj[-1] if gamma_traj else goal,
             obstacles=env.obstacles,
             world_size=world_size,
+            agent_radius=args.agent_radius,
             save_path=os.path.join(animations_dir, f"layer3_static_obstacles_{suffix}.gif"),
             stride=max(1, args.n_steps // 160),
             title="Layer 3 Static Beta-Agent Obstacle Avoidance" + (" Baseline" if args.disable_beta else ""),

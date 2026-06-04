@@ -17,19 +17,53 @@ from .gamma_navigation import GammaAgent, GammaNavigationParams, free_flocking_w
 from .layer3_static_obstacles import sample_random_left_with_min_separation
 from .metrics import (
     algebraic_connectivity,
+    average_flocking_error,
     center_of_mass_goal_distance,
+    cohesion_radius,
     collision_count,
     lattice_deviation_energy,
     mean_goal_distance,
     mean_neighbor_count,
     min_agent_distance,
     min_obstacle_clearance,
+    normalized_velocity_mismatch,
     num_connected_components,
+    relative_connectivity,
+    speed_statistics,
     velocity_consensus_error,
 )
-from .obstacles import CircleObstacle
+from .obstacles import CircleObstacle, ScriptedCircleObstacle
 from .simulator import FlockingEnv
 from .visualize import animate_trajectories, plot_metrics, plot_trajectories
+
+
+LAYER4_METRIC_KEYS = [
+    "mean_goal_distance",
+    "active_mean_goal_distance",
+    "center_of_mass_goal_distance",
+    "velocity_consensus_error",
+    "normalized_velocity_mismatch",
+    "mean_speed",
+    "max_speed",
+    "speed_std",
+    "min_agent_distance",
+    "cohesion_radius",
+    "min_obstacle_clearance",
+    "collision_count",
+    "total_collision_steps",
+    "total_collision_count",
+    "active_dynamic_risk_count",
+    "min_predicted_obstacle_clearance",
+    "control_effort",
+    "lattice_deviation_energy",
+    "average_flocking_error",
+    "formation_recovery_step",
+    "formation_recovery_time",
+    "mean_neighbor_count",
+    "connected_components",
+    "lambda_2",
+    "relative_connectivity",
+]
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -37,7 +71,17 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--method", choices=["dynamic_iapf", "static_beta", "no_tangent", "no_avoidance"], default="dynamic_iapf")
     parser.add_argument(
         "--scenario",
-        choices=["layer3_same", "single_crossing", "layer0_dynamic", "multi_dynamic", "complex_dynamic"],
+        choices=[
+            "layer3_same",
+            "single_crossing",
+            "layer0_dynamic",
+            "multi_dynamic",
+            "complex_dynamic",
+            "multi_curved_dynamic",
+            "mixed_accel_dynamic",
+            "multi_curved_dynamic_v2",
+            "mixed_accel_dynamic_v2",
+        ],
         default="layer3_same",
     )
     parser.add_argument("--fail-count", type=int, default=0, help="Number of agents that fail during simulation.")
@@ -67,8 +111,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--c1-gamma", type=float, default=1.5)
     parser.add_argument("--c2-gamma", type=float, default=1.2)
     parser.add_argument("--r-beta", type=float, default=1.5)
-    parser.add_argument("--c1-beta", type=float, default=3.0)
-    parser.add_argument("--c2-beta", type=float, default=2.0)
+    parser.add_argument("--c1-beta", type=float, default=6.0)
+    parser.add_argument("--c2-beta", type=float, default=3.0)
     parser.add_argument("--agent-radius", type=float, default=0.12)
     parser.add_argument("--prediction-horizon", type=float, default=3.0)
     parser.add_argument("--influence-distance", type=float, default=3.0)
@@ -80,6 +124,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-obs-speed", type=float, default=2.0)
     parser.add_argument("--d-safe-agent", type=float, default=0.40)
     parser.add_argument("--k-barrier", type=float, default=20.0) # 动态避障极端场景下，默认给 20.0 保证绝对安全
+    parser.add_argument("--formation-error-threshold", type=float, default=0.35)
+    parser.add_argument("--velocity-mismatch-threshold", type=float, default=0.02)
     parser.add_argument("--skip-animation", action="store_true")
     parser.add_argument("--output-dir", default="outputs")
     return parser
@@ -89,7 +135,7 @@ def write_metrics_csv(logs: Dict[str, List[float]], path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     keys = list(logs.keys())
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")
         writer.writerow(["step"] + keys)
         for idx in range(len(next(iter(logs.values())))):
             writer.writerow([idx] + [logs[key][idx] for key in keys])
@@ -124,6 +170,171 @@ def build_obstacles(scenario: str) -> List[CircleObstacle]:
             CircleObstacle(center=(11.0, 6.0), radius=0.8, velocity=(0.0, 0.0), name="static_center", dynamic=False),
             CircleObstacle(center=(13.0, 11.0), radius=0.6, velocity=(0.0, 0.0), name="static_top", dynamic=False),
             CircleObstacle(center=(9.0, 1.0), radius=0.6, velocity=(0.0, 0.0), name="static_bottom", dynamic=False),
+        ]
+    if scenario == "multi_curved_dynamic":
+        return [
+            ScriptedCircleObstacle(
+                center=(7.8, 9.4),
+                radius=0.52,
+                base_velocity=(0.18, -0.22),
+                sine_amplitude=(0.0, 1.15),
+                sine_omega=0.55,
+                sine_phase=0.2,
+                name="curved_upper_crossing",
+            ),
+            ScriptedCircleObstacle(
+                center=(11.5, 2.3),
+                radius=0.55,
+                base_velocity=(0.12, 0.22),
+                sine_amplitude=(0.95, 0.0),
+                sine_omega=0.48,
+                sine_phase=1.1,
+                name="curved_lower_crossing",
+            ),
+            ScriptedCircleObstacle(
+                center=(15.5, 6.0),
+                radius=0.48,
+                base_velocity=(-0.20, 0.0),
+                circle_radius=0.85,
+                circle_omega=0.42,
+                circle_phase=-0.4,
+                name="curved_orbit_crossing",
+            ),
+        ]
+    if scenario == "multi_curved_dynamic_v2":
+        return [
+            ScriptedCircleObstacle(
+                center=(7.3, 9.6),
+                radius=0.48,
+                base_velocity=(0.22, -0.28),
+                sine_amplitude=(0.15, 1.55),
+                sine_omega=0.75,
+                sine_phase=0.2,
+                name="v2_curved_upper_crossing",
+            ),
+            ScriptedCircleObstacle(
+                center=(10.2, 2.0),
+                radius=0.50,
+                base_velocity=(0.15, 0.28),
+                sine_amplitude=(1.25, 0.10),
+                sine_omega=0.65,
+                sine_phase=1.1,
+                name="v2_curved_lower_crossing",
+            ),
+            ScriptedCircleObstacle(
+                center=(15.7, 6.3),
+                radius=0.45,
+                base_velocity=(-0.24, 0.00),
+                circle_radius=1.05,
+                circle_omega=0.58,
+                circle_phase=-0.4,
+                name="v2_curved_orbit_crossing",
+            ),
+            ScriptedCircleObstacle(
+                center=(9.0, 5.0),
+                radius=0.42,
+                base_velocity=(0.18, 0.03),
+                sine_amplitude=(0.25, 1.25),
+                sine_omega=0.85,
+                sine_phase=2.2,
+                name="v2_curved_center_swing",
+            ),
+            ScriptedCircleObstacle(
+                center=(13.3, 10.0),
+                radius=0.45,
+                base_velocity=(-0.07, -0.30),
+                sine_amplitude=(0.90, 0.70),
+                sine_omega=0.62,
+                sine_phase=0.7,
+                name="v2_curved_late_upper",
+            ),
+            ScriptedCircleObstacle(
+                center=(16.2, 2.2),
+                radius=0.43,
+                base_velocity=(-0.22, 0.16),
+                circle_radius=0.75,
+                circle_omega=-0.68,
+                circle_phase=0.8,
+                name="v2_curved_lower_orbit",
+            ),
+        ]
+    if scenario == "mixed_accel_dynamic":
+        return [
+            ScriptedCircleObstacle(
+                center=(8.8, 10.2),
+                radius=0.55,
+                base_velocity=(0.10, -0.16),
+                acceleration=(0.0, -0.010),
+                name="accel_vertical_down",
+            ),
+            ScriptedCircleObstacle(
+                center=(16.8, 3.0),
+                radius=0.50,
+                base_velocity=(-0.16, 0.12),
+                acceleration=(-0.008, 0.006),
+                name="accel_diagonal_left",
+            ),
+            ScriptedCircleObstacle(
+                center=(12.0, 8.0),
+                radius=0.48,
+                base_velocity=(0.04, -0.14),
+                acceleration=(0.002, -0.004),
+                sine_amplitude=(1.05, 0.65),
+                sine_omega=0.50,
+                sine_phase=0.3,
+                name="accel_curved_crossing",
+            ),
+        ]
+    if scenario == "mixed_accel_dynamic_v2":
+        return [
+            ScriptedCircleObstacle(
+                center=(8.2, 10.4),
+                radius=0.50,
+                base_velocity=(0.12, -0.22),
+                acceleration=(0.002, -0.022),
+                name="v2_accel_vertical_down",
+            ),
+            ScriptedCircleObstacle(
+                center=(16.9, 3.0),
+                radius=0.48,
+                base_velocity=(-0.20, 0.14),
+                acceleration=(-0.018, 0.012),
+                name="v2_accel_diagonal_left",
+            ),
+            ScriptedCircleObstacle(
+                center=(11.0, 1.7),
+                radius=0.46,
+                base_velocity=(0.08, 0.24),
+                acceleration=(0.006, 0.020),
+                name="v2_accel_vertical_up",
+            ),
+            ScriptedCircleObstacle(
+                center=(14.8, 9.4),
+                radius=0.44,
+                base_velocity=(-0.14, -0.18),
+                acceleration=(-0.012, -0.016),
+                name="v2_accel_diagonal_down",
+            ),
+            ScriptedCircleObstacle(
+                center=(12.0, 8.0),
+                radius=0.46,
+                base_velocity=(0.06, -0.20),
+                acceleration=(0.006, -0.012),
+                sine_amplitude=(1.35, 0.95),
+                sine_omega=0.72,
+                sine_phase=0.3,
+                name="v2_accel_curved_crossing",
+            ),
+            ScriptedCircleObstacle(
+                center=(17.0, 6.4),
+                radius=0.42,
+                base_velocity=(-0.20, -0.02),
+                acceleration=(-0.014, 0.006),
+                sine_amplitude=(0.80, 1.10),
+                sine_omega=0.78,
+                sine_phase=1.4,
+                name="v2_accel_curved_late",
+            ),
         ]
     raise ValueError(f"Unknown scenario: {scenario}")
 
@@ -164,6 +375,7 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         k_tangent=args.k_tangent,
         k_obs=args.k_obs,
         max_obs_speed=args.max_obs_speed,
+        agent_radius=args.agent_radius,
         use_tangent=args.method != "no_tangent",
     )
     gamma = GammaAgent(q=goal, p=goal_velocity)
@@ -191,26 +403,13 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
     obstacle_frames: List[List[Dict[str, object]]] = []
     total_collision_steps = 0
     total_collision_count = 0
-    logs: Dict[str, List[float]] = {
-        "mean_goal_distance": [],
-        "active_mean_goal_distance": [],  # 新增：非故障智能体的平均目标距离
-        "center_of_mass_goal_distance": [],
-        "velocity_consensus_error": [],
-        "min_agent_distance": [],
-        "min_obstacle_clearance": [],
-        "collision_count": [],
-        "total_collision_steps": [],
-        "total_collision_count": [],
-        "active_dynamic_risk_count": [],
-        "min_predicted_obstacle_clearance": [],
-        "control_effort": [],
-        "lattice_deviation_energy": [],
-        "mean_neighbor_count": [],
-        "connected_components": [],
-        "lambda_2": [],
-    }
+    logs: Dict[str, List[float]] = {key: [] for key in LAYER4_METRIC_KEYS}
 
     active_indices = [i for i in range(args.n_agents) if i not in failed_indices]
+    q_ref = state.q.copy()
+    disturbance_started = False
+    formation_recovery_step = -1.0
+    formation_recovery_time = -1.0
 
     for step_idx in tqdm(range(args.n_steps), desc=f"Layer 4 {args.method}", leave=False):
         if args.method == "no_avoidance":
@@ -249,6 +448,27 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         traj.append(state.q.copy())
         velocities.append(state.p.copy())
         obstacle_frames.append(state.obstacles)
+        active_risk_count = diagnostics["active_dynamic_risk_count"]
+        if active_risk_count > 0.0:
+            disturbance_started = True
+        elif not disturbance_started:
+            q_ref = state.q.copy()
+
+        flocking_error = average_flocking_error(state.q, q_ref)
+        lattice_energy = lattice_deviation_energy(state.q, alpha_params.r, alpha_params.d)
+        norm_vel_mismatch = normalized_velocity_mismatch(state.p)
+        if (
+            disturbance_started
+            and formation_recovery_step < 0.0
+            and active_risk_count == 0.0
+            and lattice_energy <= args.formation_error_threshold
+            and norm_vel_mismatch <= args.velocity_mismatch_threshold
+        ):
+            formation_recovery_step = float(step_idx)
+            formation_recovery_time = float(step_idx * args.dt)
+
+        mean_speed, max_speed, speed_std = speed_statistics(state.p)
+
         logs["mean_goal_distance"].append(mean_goal_distance(state.q, gamma.q))
         
         # 计算活跃智能体的指标
@@ -260,18 +480,27 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
 
         logs["center_of_mass_goal_distance"].append(center_of_mass_goal_distance(state.q, gamma.q))
         logs["velocity_consensus_error"].append(velocity_consensus_error(state.p))
+        logs["normalized_velocity_mismatch"].append(norm_vel_mismatch)
+        logs["mean_speed"].append(mean_speed)
+        logs["max_speed"].append(max_speed)
+        logs["speed_std"].append(speed_std)
         logs["min_agent_distance"].append(min_agent_distance(state.q))
+        logs["cohesion_radius"].append(cohesion_radius(state.q))
         logs["min_obstacle_clearance"].append(min_obstacle_clearance(state.q, env.obstacles, agent_radius=args.agent_radius))
         logs["collision_count"].append(float(current_collisions))
         logs["total_collision_steps"].append(float(total_collision_steps))
         logs["total_collision_count"].append(float(total_collision_count))
-        logs["active_dynamic_risk_count"].append(diagnostics["active_dynamic_risk_count"])
+        logs["active_dynamic_risk_count"].append(active_risk_count)
         logs["min_predicted_obstacle_clearance"].append(diagnostics["min_predicted_obstacle_clearance"])
         logs["control_effort"].append(float(np.mean(np.sum(u * u, axis=1))))
-        logs["lattice_deviation_energy"].append(lattice_deviation_energy(state.q, alpha_params.r, alpha_params.d))
+        logs["lattice_deviation_energy"].append(lattice_energy)
+        logs["average_flocking_error"].append(flocking_error)
+        logs["formation_recovery_step"].append(formation_recovery_step)
+        logs["formation_recovery_time"].append(formation_recovery_time)
         logs["mean_neighbor_count"].append(mean_neighbor_count(state.q, alpha_params.r))
         logs["connected_components"].append(float(num_connected_components(state.q, alpha_params.r)))
         logs["lambda_2"].append(algebraic_connectivity(state.q, alpha_params.r))
+        logs["relative_connectivity"].append(relative_connectivity(state.q, alpha_params.r))
 
     figures_dir = os.path.join(args.output_dir, "figures", "layer4")
     animations_dir = os.path.join(args.output_dir, "animations", "layer4")
@@ -283,10 +512,11 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
         goal=gamma.q,
         obstacles=env.obstacles,
         world_size=world_size,
+        agent_radius=args.agent_radius,
         save_path=os.path.join(figures_dir, f"{stem}_trajectories.png"),
         title=f"Layer 4 Dynamic IAPF ({args.method})",
     )
-    plot_metrics(logs, save_dir=figures_dir)
+    plot_metrics(logs, save_dir=os.path.join(figures_dir, stem))
     write_metrics_csv(logs, os.path.join(logs_dir, f"{stem}_metrics.csv"))
 
     if not args.skip_animation:
@@ -296,6 +526,7 @@ def run_demo(args: argparse.Namespace) -> Dict[str, List[float]]:
             goal=gamma.q,
             obstacle_trajectories=obstacle_frames,
             world_size=world_size,
+            agent_radius=args.agent_radius,
             save_path=os.path.join(animations_dir, f"{stem}.gif"),
             stride=max(1, args.n_steps // 160),
             title=f"Layer 4 Dynamic IAPF ({args.method})",

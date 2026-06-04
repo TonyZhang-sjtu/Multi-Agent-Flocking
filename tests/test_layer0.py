@@ -7,8 +7,18 @@ import unittest
 import numpy as np
 
 from mas_flocking.controllers import goal_pd_control, zero_control
-from mas_flocking.metrics import adjacency_matrix, algebraic_connectivity, min_agent_distance, num_connected_components
-from mas_flocking.obstacles import CircleObstacle
+from mas_flocking.metrics import (
+    adjacency_matrix,
+    algebraic_connectivity,
+    average_flocking_error,
+    cohesion_radius,
+    min_agent_distance,
+    normalized_velocity_mismatch,
+    num_connected_components,
+    relative_connectivity,
+    speed_statistics,
+)
+from mas_flocking.obstacles import CircleObstacle, ScriptedCircleObstacle
 from mas_flocking.simulator import FlockingEnv
 
 
@@ -55,13 +65,45 @@ class TestLayer0(unittest.TestCase):
         np.testing.assert_allclose(np.diag(adjacency), np.zeros(3))
         self.assertEqual(num_connected_components(q, radius=1.5), 2)
         self.assertAlmostEqual(algebraic_connectivity(q, radius=1.5), 0.0)
+        self.assertAlmostEqual(relative_connectivity(q, radius=1.5), 0.5)
         self.assertAlmostEqual(min_agent_distance(q), 1.0)
+
+    def test_layer4_reusable_flocking_metrics(self) -> None:
+        q_ref = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]])
+        q_same_distances = q_ref + np.array([2.0, 3.0])
+        q_deformed = np.array([[0.0, 0.0], [2.0, 0.0], [0.0, 1.0]])
+        p_consensus = np.array([[1.0, 0.0], [1.0, 0.0], [1.0, 0.0]])
+        p_mismatch = np.array([[1.0, 0.0], [0.0, 0.0], [2.0, 0.0]])
+
+        self.assertAlmostEqual(average_flocking_error(q_same_distances, q_ref), 0.0)
+        self.assertGreater(average_flocking_error(q_deformed, q_ref), 0.0)
+        self.assertGreater(cohesion_radius(q_ref), 0.0)
+        self.assertAlmostEqual(normalized_velocity_mismatch(p_consensus), 0.0)
+        self.assertGreater(normalized_velocity_mismatch(p_mismatch), 0.0)
+        mean_speed, max_speed, speed_std = speed_statistics(p_mismatch)
+        self.assertGreater(mean_speed, 0.0)
+        self.assertAlmostEqual(max_speed, 2.0)
+        self.assertGreater(speed_std, 0.0)
 
     def test_dynamic_obstacle_steps_and_reflects(self) -> None:
         obs = CircleObstacle(center=(1.8, 1.0), radius=0.2, velocity=(1.0, 0.0), name="dyn")
         obs.step(dt=1.0, world_size=np.array([2.0, 2.0]), boundary_mode="reflect")
         self.assertAlmostEqual(float(obs.center[0]), 1.8)
         self.assertLess(float(obs.velocity[0]), 0.0)
+
+    def test_scripted_obstacle_updates_position_and_velocity(self) -> None:
+        obs = ScriptedCircleObstacle(
+            center=(1.0, 2.0),
+            radius=0.2,
+            base_velocity=(0.5, 0.0),
+            acceleration=(0.2, 0.0),
+            sine_amplitude=(0.0, 1.0),
+            sine_omega=1.0,
+            name="scripted",
+        )
+        obs.step(dt=1.0, world_size=None, boundary_mode="none")
+        np.testing.assert_allclose(obs.center, np.array([1.6, 2.0 + np.sin(1.0)]))
+        np.testing.assert_allclose(obs.velocity, np.array([0.7, np.cos(1.0)]))
 
 
 if __name__ == "__main__":

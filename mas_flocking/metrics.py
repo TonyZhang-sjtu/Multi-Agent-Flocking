@@ -47,6 +47,24 @@ def velocity_consensus_error(p: np.ndarray) -> float:
     return float(np.mean(np.linalg.norm(p_arr - p_bar, axis=1)))
 
 
+def normalized_velocity_mismatch(p: np.ndarray, eps: float = 1e-12) -> float:
+    """Scale-free velocity disagreement around the group mean velocity."""
+    if eps <= 0:
+        raise ValueError("eps must be positive")
+    p_arr = as_2d_array(p, "p")
+    p_bar = np.mean(p_arr, axis=0, keepdims=True)
+    numerator = float(np.sum((p_arr - p_bar) ** 2))
+    denominator = float(np.sum(p_arr**2)) + eps
+    return numerator / denominator
+
+
+def speed_statistics(p: np.ndarray) -> tuple[float, float, float]:
+    """Return mean, max, and standard deviation of agent speed magnitudes."""
+    p_arr = as_2d_array(p, "p")
+    speeds = np.linalg.norm(p_arr, axis=1)
+    return float(np.mean(speeds)), float(np.max(speeds)), float(np.std(speeds))
+
+
 def min_agent_distance(q: np.ndarray) -> float:
     """Minimum pairwise agent distance, excluding self-distances."""
     q_arr = as_2d_array(q, "q")
@@ -68,6 +86,13 @@ def center_of_mass(q: np.ndarray) -> np.ndarray:
     """Mean agent position."""
     q_arr = as_2d_array(q, "q")
     return np.mean(q_arr, axis=0)
+
+
+def cohesion_radius(q: np.ndarray) -> float:
+    """Maximum distance from any agent to the group center of mass."""
+    q_arr = as_2d_array(q, "q")
+    q_bar = np.mean(q_arr, axis=0, keepdims=True)
+    return float(np.max(np.linalg.norm(q_arr - q_bar, axis=1)))
 
 
 def center_of_mass_goal_distance(q: np.ndarray, goal: np.ndarray) -> float:
@@ -120,6 +145,18 @@ def algebraic_connectivity(q: np.ndarray, radius: float) -> float:
     return float(max(eigvals[1], 0.0))
 
 
+def relative_connectivity(q: np.ndarray, radius: float) -> float:
+    """Rank-normalized graph connectivity in [0, 1]."""
+    adjacency = adjacency_matrix(q, radius)
+    n_agents = adjacency.shape[0]
+    if n_agents < 2:
+        return 1.0
+    degree = np.diag(adjacency.sum(axis=1))
+    laplacian = degree - adjacency
+    rank = np.linalg.matrix_rank(laplacian, tol=1e-9)
+    return float(rank / (n_agents - 1))
+
+
 def lattice_deviation_energy(q: np.ndarray, radius: float, desired_distance: float) -> float:
     """Mean squared deviation from desired neighbor distance over graph edges."""
     if desired_distance <= 0:
@@ -137,3 +174,12 @@ def mean_neighbor_count(q: np.ndarray, radius: float) -> float:
     """Average number of Euclidean-radius neighbors per agent."""
     adjacency = adjacency_matrix(q, radius)
     return float(np.mean(np.sum(adjacency > 0.0, axis=1)))
+
+
+def average_flocking_error(q: np.ndarray, q_ref: np.ndarray) -> float:
+    """Shao-style average pairwise-distance error relative to a reference flock."""
+    q_arr = as_2d_array(q, "q")
+    q_ref_arr = as_2d_array(q_ref, "q_ref", expected_rows=q_arr.shape[0])
+    dists = pairwise_distances(q_arr)
+    ref_dists = pairwise_distances(q_ref_arr)
+    return float(np.sum(np.abs(dists - ref_dists)) / (2.0 * q_arr.shape[0]))

@@ -67,7 +67,7 @@ def write_metrics_csv(logs: Dict[str, List[float]], path: str) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     keys = list(logs.keys())
     with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.writer(f)
+        writer = csv.writer(f, lineterminator="\n")
         writer.writerow(["step"] + keys)
         for idx in range(len(next(iter(logs.values())))):
             writer.writerow([idx] + [logs[key][idx] for key in keys])
